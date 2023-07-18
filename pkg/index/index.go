@@ -2,20 +2,26 @@ package index
 
 import (
 	"crypto/md5"
+	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"os"
-	"path/filepath"
 	"sync"
 )
 
 // IndexPath walks the directory structure below basepath and
 // generates an index.
 func (i *Indexer) IndexPath(basepath string) (*Index, error) {
+	if !fs.ValidPath(basepath) {
+		return nil, errors.New("path must be unrooted, cannot start or end with /, cannot contain ..")
+	}
+
 	i.basepath = basepath
 	i.idx = &Index{Files: make(map[string]FileData), Mutex: new(sync.Mutex)}
+	i.idx.fs = os.DirFS(i.basepath)
 
-	if err := fs.WalkDir(os.DirFS(basepath), basepath, i.walkDir); err != nil {
+	if err := fs.WalkDir(i.idx.fs, ".", i.walkDir); err != nil {
 		return new(Index), err
 	}
 
@@ -25,7 +31,8 @@ func (i *Indexer) IndexPath(basepath string) (*Index, error) {
 
 func (i *Indexer) walkDir(path string, d fs.DirEntry, err error) error {
 	if err != nil {
-		return err
+		log.Println(err)
+		return nil
 	}
 
 	if d.IsDir() {
@@ -38,8 +45,10 @@ func (i *Indexer) walkDir(path string, d fs.DirEntry, err error) error {
 }
 
 func (i *Indexer) handleFile(path string, d fs.DirEntry) {
-	f, err := os.Open(path)
+	defer i.idx.wg.Done()
+	f, err := i.idx.fs.Open(path)
 	if err != nil {
+		log.Println(err)
 		return
 	}
 	defer f.Close()
@@ -51,9 +60,7 @@ func (i *Indexer) handleFile(path string, d fs.DirEntry) {
 
 	fdat := FileData{HashType: MD5, HashValue: h.Sum(nil)}
 
-	rpath, _ := filepath.Rel(i.basepath, path)
 	i.idx.Lock()
-	i.idx.Files[rpath] = fdat
+	i.idx.Files[path] = fdat
 	i.idx.Unlock()
-	i.idx.wg.Done()
 }

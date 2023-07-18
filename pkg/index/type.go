@@ -1,6 +1,7 @@
 package index
 
 import (
+	"io/fs"
 	"sync"
 )
 
@@ -19,6 +20,7 @@ type Index struct {
 
 	*sync.Mutex
 	wg sync.WaitGroup
+	fs fs.FS
 }
 
 // FileData provides a transport for the information about the files.
