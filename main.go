@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"
 )
@@ -9,7 +10,7 @@ import (
 func main() {
 	i := new(index.Indexer)
 
-	idx, err := i.IndexPath(".")
+	idx, err := i.IndexPath(os.Args[1])
 	if err != nil {
 		fmt.Println(err)
 		return

@@ -6,7 +6,6 @@ import (
 
 // An Indexer handles indexing.
 type Indexer struct {
-	mux sync.RWMutex
 	idx *Index
 
 	basepath string
@@ -17,13 +16,16 @@ type Indexer struct {
 // you must parse paths to do subdirectories.
 type Index struct {
 	Files map[string]FileData
+
+	*sync.Mutex
+	wg sync.WaitGroup
 }
 
 // FileData provides a transport for the information about the files.
 // It is done as a structure to allow easily adopting different hash
 // types in the future.
 type FileData struct {
-	HashType HashType
+	HashType  HashType
 	HashValue []byte
 }
 
@@ -34,5 +36,4 @@ const (
 	// MD5 is a basic hash type.  Not great, not bad, just a basic
 	// hash type.
 	MD5 HashType = iota
-
 )
