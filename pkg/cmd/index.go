@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"os"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"crypto/md5"
 	"errors"
 	"io"
@@ -62,4 +63,39 @@ func (i *Indexer) handleFile(path string, d fs.DirEntry) {
 	i.idx.Lock()
 	i.idx.Files[path] = h.Sum(nil)
 	i.idx.Unlock()
+}
+
+// ComputeDifference works out what is missing locally from the target
+// index and what exists locally that has been removed from the target
+// index.
+func (i *Indexer) ComputeDifference(target *Index) ([]string, []string) {
+	need := []string{}
+	dump := []string{}
+
+	remote := make(map[string][]byte, len(target.Files))
+	for k, v := range target.Files {
+		remote[k] = v
+	}
+
+	local := make(map[string][]byte, len(i.idx.Files))
+	for k, v := range i.idx.Files {
+		local[k] = v
+	}
+
+	// Get missing files or files that have changed.
+	for rfile, rsum := range remote {
+		lsum, ok := local[rfile]
+		if !ok || !bytes.Equal(lsum, rsum) {
+			need = append(need, rfile)
+		}
+		delete(remote, rfile)
+		delete(local, rfile)
+	}
+
+	// Anything left no longer exists in the remote index.
+	for lfile := range local {
+		dump = append(dump, lfile)
+	}
+
+	return need, dump
 }
