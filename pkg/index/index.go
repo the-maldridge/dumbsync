@@ -18,8 +18,9 @@ func (i *Indexer) IndexPath(basepath string) (*Index, error) {
 	}
 
 	i.basepath = basepath
-	i.idx = &Index{Files: make(map[string]FileData), Mutex: new(sync.Mutex)}
+	i.idx = &Index{Files: make(map[string][]byte), Mutex: new(sync.Mutex)}
 	i.idx.fs = os.DirFS(i.basepath)
+	i.idx.HashType = MD5
 
 	if err := fs.WalkDir(i.idx.fs, ".", i.walkDir); err != nil {
 		return new(Index), err
@@ -58,9 +59,7 @@ func (i *Indexer) handleFile(path string, d fs.DirEntry) {
 		return
 	}
 
-	fdat := FileData{HashType: MD5, HashValue: h.Sum(nil)}
-
 	i.idx.Lock()
-	i.idx.Files[path] = fdat
+	i.idx.Files[path] = h.Sum(nil)
 	i.idx.Unlock()
 }

@@ -16,19 +16,12 @@ type Indexer struct {
 // determine whether a file is out of date.  The Index is flat, and
 // you must parse paths to do subdirectories.
 type Index struct {
-	Files map[string]FileData
+	Files    map[string][]byte
+	HashType HashType
 
 	*sync.Mutex
 	wg sync.WaitGroup
 	fs fs.FS
-}
-
-// FileData provides a transport for the information about the files.
-// It is done as a structure to allow easily adopting different hash
-// types in the future.
-type FileData struct {
-	HashType  HashType
-	HashValue []byte
 }
 
 // HashType stores what kind of hash was used to validate the data.

@@ -31,7 +31,7 @@ func indexCmdRun(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	for f, d := range idx.Files {
-		fmt.Printf("%X: %s\n", d.HashValue, f)
+	for f, h := range idx.Files {
+		fmt.Printf("%X: %s\n", h, f)
 	}
 }
