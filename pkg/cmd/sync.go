@@ -3,9 +3,14 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"
@@ -17,10 +22,12 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 
 	syncCmd.Flags().StringVarP(&syncCmdFileName, "index", "i", "dumbsync.json", "Index File")
+	syncCmd.Flags().IntVarP(&syncCmdThreads, "theads", "t", 10, "Sync Threads")
 }
 
 var (
 	syncCmdFileName string
+	syncCmdThreads  int
 
 	syncCmd = &cobra.Command{
 		Use:   "sync <source> <path>",
@@ -41,9 +48,10 @@ func syncCmdRun(cmd *cobra.Command, args []string) {
 		fmt.Println(err)
 		return
 	}
-	u.Path = path.Join(u.Path, syncCmdFileName)
+	du := *u
+	du.Path = path.Join(du.Path, syncCmdFileName)
 
-	resp, err := httpClient.Get(u.String())
+	resp, err := httpClient.Get(du.String())
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -64,7 +72,47 @@ func syncCmdRun(cmd *cobra.Command, args []string) {
 	}
 
 	need, dump := i.ComputeDifference(sidx)
+	sort.Strings(need)
+	sort.Strings(dump)
 
-	fmt.Println("need", need)
-	fmt.Println("dump", dump)
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, syncCmdThreads)
+	for _, file := range need {
+		go func(f string) {
+			wg.Add(1)
+			limit <- struct{}{}
+			fmt.Println(f)
+			syncCmdGetFile(httpClient, *u, f)
+			<-limit
+			wg.Done()
+		}(file)
+	}
+	wg.Wait()
+
+	for _, file := range dump {
+		if err := os.RemoveAll(file); err != nil {
+			fmt.Println(err)
+		}
+	}
+}
+
+func syncCmdGetFile(c http.Client, tu url.URL, file string) {
+	tu.Path = path.Join(tu.Path, file)
+	resp, err := c.Get(tu.String())
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+		fmt.Println(err)
+	}
+
+	f, err := os.Create(file)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	io.Copy(f, resp.Body)
+	f.Close()
+	resp.Body.Close()
 }
