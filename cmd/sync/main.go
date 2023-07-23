@@ -1,7 +1,8 @@
-package cmd
+package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,42 +15,30 @@ import (
 	"time"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"
-
-	"github.com/spf13/cobra"
 )
-
-func init() {
-	rootCmd.AddCommand(syncCmd)
-
-	syncCmd.Flags().StringVarP(&syncCmdFileName, "index", "i", "dumbsync.json", "Index File")
-	syncCmd.Flags().IntVarP(&syncCmdThreads, "theads", "t", 10, "Sync Threads")
-}
 
 var (
-	syncCmdFileName string
-	syncCmdThreads  int
-
-	syncCmd = &cobra.Command{
-		Use:   "sync <source> <path>",
-		Short: "sync makes path equivalent to the source described by index",
-		Long: `sync fetches a remote index, compares it to a local filesystem,
-and downloads or removes files to make the local filesystem match the
-remote one.`,
-		Run:  syncCmdRun,
-		Args: cobra.ExactArgs(2),
-	}
+	syncFileName = flag.String("index", "dumbsync.json", "Index filename")
+	syncThreads  = flag.Int("threads", 10, "Number of threads to use while syncing")
 )
 
-func syncCmdRun(cmd *cobra.Command, args []string) {
+func main() {
+	flag.Parse()
+	if len(flag.Args()) != 2 {
+		fmt.Fprintln(os.Stderr, "Usage: dumbsync <url> <path>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "You must specify a URL to sync from, and a path to sync to!")
+	}
+
 	httpClient := http.Client{Timeout: time.Second * 10}
 
-	u, err := url.Parse(args[0])
+	u, err := url.Parse(flag.Args()[0])
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	du := *u
-	du.Path = path.Join(du.Path, syncCmdFileName)
+	du.Path = path.Join(du.Path, *syncFileName)
 
 	resp, err := httpClient.Get(du.String())
 	if err != nil {
@@ -66,7 +55,7 @@ func syncCmdRun(cmd *cobra.Command, args []string) {
 	}
 
 	i := new(index.Indexer)
-	if _, err := i.IndexPath(args[1]); err != nil {
+	if _, err := i.IndexPath(flag.Args()[1]); err != nil {
 		fmt.Println(err)
 		return
 	}
@@ -76,7 +65,7 @@ func syncCmdRun(cmd *cobra.Command, args []string) {
 	sort.Strings(dump)
 
 	var wg sync.WaitGroup
-	limit := make(chan struct{}, syncCmdThreads)
+	limit := make(chan struct{}, *syncThreads)
 	for _, file := range need {
 		go func(f string) {
 			wg.Add(1)
