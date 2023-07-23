@@ -19,6 +19,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Usage: dumbsync-index <path>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "You must specify a path to index!")
+		return
 	}
 
 	i := new(index.Indexer)

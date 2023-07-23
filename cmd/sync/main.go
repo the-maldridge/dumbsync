@@ -28,6 +28,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Usage: dumbsync <url> <path>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "You must specify a URL to sync from, and a path to sync to!")
+		return
 	}
 
 	httpClient := http.Client{Timeout: time.Second * 10}
