@@ -68,8 +68,8 @@ func main() {
 	var wg sync.WaitGroup
 	limit := make(chan struct{}, *syncThreads)
 	for _, file := range need {
+		wg.Add(1)
 		go func(f string) {
-			wg.Add(1)
 			limit <- struct{}{}
 			fmt.Println(f)
 			syncCmdGetFile(httpClient, *u, f)
