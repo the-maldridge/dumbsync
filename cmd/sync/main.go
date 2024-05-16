@@ -71,7 +71,7 @@ func main() {
 		wg.Add(1)
 		go func(f string) {
 			limit <- struct{}{}
-			fmt.Println(f)
+			fmt.Printf("[+] %s\n", f)
 			syncCmdGetFile(httpClient, *u, f)
 			<-limit
 			wg.Done()
@@ -80,6 +80,7 @@ func main() {
 	wg.Wait()
 
 	for _, file := range dump {
+		fmt.Printf("[-] %s\n", file)
 		if err := os.RemoveAll(file); err != nil {
 			fmt.Println(err)
 		}
@@ -93,11 +94,11 @@ func syncCmdGetFile(c http.Client, tu url.URL, file string) {
 		fmt.Println(err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(flag.Args()[1], file)), 0755); err != nil {
 		fmt.Println(err)
 	}
 
-	f, err := os.Create(file)
+	f, err := os.Create(filepath.Join(flag.Args()[1], file))
 	if err != nil {
 		fmt.Println(err)
 		return
