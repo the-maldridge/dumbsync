@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,8 +19,10 @@ import (
 )
 
 var (
-	syncFileName = flag.String("index", "dumbsync.json", "Index filename")
-	syncThreads  = flag.Int("threads", 10, "Number of threads to use while syncing")
+	syncFileName    = flag.String("index", "dumbsync.json", "Index filename")
+	syncThreads     = flag.Int("threads", 10, "Number of threads to use while syncing")
+	syncCertFile    = flag.String("cert", "", "Client Certificate")
+	syncCertKeyFile = flag.String("key", "", "Client Key")
 )
 
 func main() {
@@ -32,6 +35,18 @@ func main() {
 	}
 
 	httpClient := http.Client{Timeout: time.Second * 10}
+
+	if *syncCertFile != "" && *syncCertKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(*syncCertFile, *syncCertKeyFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading client certificate: %s\n", err)
+			return
+		}
+
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+		}
+	}
 
 	u, err := url.Parse(flag.Args()[0])
 	if err != nil {
