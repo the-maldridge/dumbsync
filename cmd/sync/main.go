@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/google/shlex"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"
 )
@@ -23,6 +26,7 @@ var (
 	syncThreads     = flag.Int("threads", 10, "Number of threads to use while syncing")
 	syncCertFile    = flag.String("cert", "", "Client Certificate")
 	syncCertKeyFile = flag.String("key", "", "Client Key")
+	syncExec        = flag.String("exec", "", "Execute a command when files are changed")
 )
 
 func main() {
@@ -98,6 +102,21 @@ func main() {
 		fmt.Printf("[-] %s\n", file)
 		if err := os.RemoveAll(file); err != nil {
 			fmt.Println(err)
+		}
+	}
+
+	if *syncExec != "" && ((len(need) > 0) || (len(dump) > 0)) {
+		parts, err := shlex.Split(*syncExec)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Could not exec cmd: %s\n", err)
+			return
+		}
+		cmd := exec.Command(parts[0], parts[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Command did not complete successfully: %s\n", err)
+			return
 		}
 	}
 }
