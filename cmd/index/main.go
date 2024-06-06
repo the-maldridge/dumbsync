@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"
 )
@@ -30,7 +31,7 @@ func main() {
 		return
 	}
 
-	delete(idx.Files, *indexFilePath)
+	delete(idx.Files, filepath.Base(*indexFilePath))
 
 	bytes, err := json.Marshal(idx)
 	if err != nil {
