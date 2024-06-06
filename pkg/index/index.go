@@ -65,6 +65,11 @@ func (i *Indexer) handleFile(path string, d fs.DirEntry) {
 	i.idx.Unlock()
 }
 
+// PruneFile can be used to remove a file from the index directly.
+func (i *Indexer) PruneFile(file string) {
+	delete(i.idx.Files, file)
+}
+
 // ComputeDifference works out what is missing locally from the target
 // index and what exists locally that has been removed from the target
 // index.

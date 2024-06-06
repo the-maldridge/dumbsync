@@ -79,6 +79,7 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	i.PruneFile(filepath.Join(flag.Args()[1], *syncFileName))
 
 	need, dump := i.ComputeDifference(sidx)
 	sort.Strings(need)
