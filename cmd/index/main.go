@@ -30,6 +30,8 @@ func main() {
 		return
 	}
 
+	delete(idx.Files, *indexFilePath)
+
 	bytes, err := json.Marshal(idx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error while marhsalling index:", err)
