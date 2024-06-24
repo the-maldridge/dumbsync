@@ -101,7 +101,7 @@ func main() {
 
 	for _, file := range dump {
 		fmt.Printf("[-] %s\n", file)
-		if err := os.RemoveAll(file); err != nil {
+		if err := os.RemoveAll(filepath.Join(flag.Args()[1], file)); err != nil {
 			fmt.Println(err)
 		}
 	}
