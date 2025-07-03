@@ -31,4 +31,9 @@ const (
 	// MD5 is a basic hash type.  Not great, not bad, just a basic
 	// hash type.
 	MD5 HashType = iota
+
+	// XXHash is a very fast non-crypto hash.  It is great for
+	// detecting file differences but is not as resistant to
+	// tampering.
+	XXHash
 )

@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"crypto/md5"
 	"errors"
+	"hash"
 	"io"
 	"io/fs"
 	"log"
 	"os"
+	"strings"
 	"sync"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 // IndexPath walks the directory structure below basepath and
@@ -21,7 +25,15 @@ func (i *Indexer) IndexPath(basepath string) (*Index, error) {
 	i.basepath = basepath
 	i.idx = &Index{Files: make(map[string][]byte), Mutex: new(sync.Mutex)}
 	i.idx.fs = os.DirFS(i.basepath)
-	i.idx.HashType = MD5
+
+	switch strings.ToUpper(os.Getenv("DUMBSYNC_HASH")) {
+	case "MD5":
+		i.idx.HashType = MD5
+	case "XX":
+		i.idx.HashType = XXHash
+	default:
+		i.idx.HashType = MD5
+	}
 
 	if err := fs.WalkDir(i.idx.fs, ".", i.walkDir); err != nil {
 		return new(Index), err
@@ -55,7 +67,13 @@ func (i *Indexer) handleFile(path string, d fs.DirEntry) {
 	}
 	defer f.Close()
 
-	h := md5.New()
+	var h hash.Hash
+	switch i.idx.HashType {
+	case MD5:
+		h = md5.New()
+	case XXHash:
+		h = xxhash.New()
+	}
 	if _, err := io.Copy(h, f); err != nil {
 		return
 	}
