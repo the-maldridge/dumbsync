@@ -60,6 +60,7 @@ func main() {
 	du := *u
 	du.Path = path.Join(du.Path, *syncFileName)
 
+	fmt.Printf("Synchronizing against %s\n", du.String())
 	resp, err := httpClient.Get(du.String())
 	if err != nil {
 		fmt.Println(err)
