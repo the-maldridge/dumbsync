@@ -9,6 +9,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -o /dumbsync ./cmd/sync/main.go
 
 FROM scratch
+LABEL org.opencontainers.image.source="github.com/the-maldridge/dumbsync"
 COPY --from=build /dumbsync-index /dumbsync-index
 COPY --from=build /dumbsync /dumbsync
 COPY --from=build /sbin/tini-static /tini
