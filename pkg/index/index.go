@@ -77,6 +77,7 @@ func (i *Indexer) handleFile(path string, d fs.DirEntry) {
 	if _, err := io.Copy(h, f); err != nil {
 		return
 	}
+	f.Close()
 
 	i.idx.Lock()
 	i.idx.Files[path] = h.Sum(nil)
