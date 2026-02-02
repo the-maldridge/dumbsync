@@ -22,11 +22,12 @@ import (
 )
 
 var (
-	syncFileName    = flag.String("index", "dumbsync.json", "Index filename")
-	syncThreads     = flag.Int("threads", 10, "Number of threads to use while syncing")
-	syncCertFile    = flag.String("cert", "", "Client Certificate")
-	syncCertKeyFile = flag.String("key", "", "Client Key")
-	syncExec        = flag.String("exec", "", "Execute a command when files are changed")
+	syncFetchTimeout = flag.Duration("timeout", time.Second*10, "Timeout for file acquisition")
+	syncFileName     = flag.String("index", "dumbsync.json", "Index filename")
+	syncThreads      = flag.Int("threads", 10, "Number of threads to use while syncing")
+	syncCertFile     = flag.String("cert", "", "Client Certificate")
+	syncCertKeyFile  = flag.String("key", "", "Client Key")
+	syncExec         = flag.String("exec", "", "Execute a command when files are changed")
 )
 
 func main() {
@@ -38,7 +39,7 @@ func main() {
 		return
 	}
 
-	httpClient := http.Client{Timeout: time.Second * 10}
+	httpClient := http.Client{Timeout: *syncFetchTimeout}
 
 	if *syncCertFile != "" && *syncCertKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(*syncCertFile, *syncCertKeyFile)
