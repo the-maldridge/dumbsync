@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -31,97 +32,104 @@ var (
 )
 
 func main() {
-	flag.Parse()
-	if len(flag.Args()) != 2 {
-		fmt.Fprintln(os.Stderr, "Usage: dumbsync <url> <path>")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "You must specify a URL to sync from, and a path to sync to!")
-		return
-	}
+	os.Exit(func() int {
+		flag.Parse()
+		if len(flag.Args()) != 2 {
+			fmt.Fprintln(os.Stderr, "Usage: dumbsync <url> <path>")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "You must specify a URL to sync from, and a path to sync to!")
+			return 2
+		}
 
-	httpClient := http.Client{Timeout: *syncFetchTimeout}
+		httpClient := http.Client{Timeout: *syncFetchTimeout}
 
-	if *syncCertFile != "" && *syncCertKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(*syncCertFile, *syncCertKeyFile)
+		if *syncCertFile != "" && *syncCertKeyFile != "" {
+			cert, err := tls.LoadX509KeyPair(*syncCertFile, *syncCertKeyFile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading client certificate: %s\n", err)
+				return 2
+			}
+
+			httpClient.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+			}
+		}
+
+		u, err := url.Parse(flag.Args()[0])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading client certificate: %s\n", err)
-			return
-		}
-
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
-		}
-	}
-
-	u, err := url.Parse(flag.Args()[0])
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	du := *u
-	du.Path = path.Join(du.Path, *syncFileName)
-
-	fmt.Printf("Synchronizing against %s\n", du.String())
-	resp, err := httpClient.Get(du.String())
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer resp.Body.Close()
-
-	sidx := new(index.Index)
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(sidx); err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	i := new(index.Indexer)
-	if _, err := i.IndexPath(flag.Args()[1]); err != nil {
-		fmt.Println(err)
-		return
-	}
-	i.PruneFile(filepath.Join(flag.Args()[1], *syncFileName))
-
-	need, dump := i.ComputeDifference(sidx)
-	sort.Strings(need)
-	sort.Strings(dump)
-
-	var wg sync.WaitGroup
-	limit := make(chan struct{}, *syncThreads)
-	for _, file := range need {
-		wg.Add(1)
-		go func(f string) {
-			limit <- struct{}{}
-			fmt.Printf("[+] %s\n", f)
-			syncCmdGetFile(httpClient, *u, f)
-			<-limit
-			wg.Done()
-		}(file)
-	}
-	wg.Wait()
-
-	for _, file := range dump {
-		fmt.Printf("[-] %s\n", file)
-		if err := os.RemoveAll(filepath.Join(flag.Args()[1], file)); err != nil {
 			fmt.Println(err)
+			return 2
 		}
-	}
+		du := *u
+		du.Path = path.Join(du.Path, *syncFileName)
 
-	if *syncExec != "" && ((len(need) > 0) || (len(dump) > 0)) {
-		parts, err := shlex.Split(*syncExec)
+		fmt.Printf("Synchronizing against %s\n", du.String())
+		resp, err := httpClient.Get(du.String())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Could not exec cmd: %s\n", err)
-			return
+			fmt.Println(err)
+			return 1
 		}
-		cmd := exec.Command(parts[0], parts[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Command did not complete successfully: %s\n", err)
-			return
+		defer resp.Body.Close()
+
+		sidx := new(index.Index)
+		dec := json.NewDecoder(resp.Body)
+		if err := dec.Decode(sidx); err != nil {
+			fmt.Println(err)
+			return 1
 		}
-	}
+
+		i := new(index.Indexer)
+		if _, err := i.IndexPath(flag.Args()[1]); err != nil {
+			fmt.Println(err)
+			return 1
+		}
+		i.PruneFile(filepath.Join(flag.Args()[1], *syncFileName))
+
+		need, dump := i.ComputeDifference(sidx)
+		sort.Strings(need)
+		sort.Strings(dump)
+
+		var wg sync.WaitGroup
+		limit := make(chan struct{}, *syncThreads)
+		for _, file := range need {
+			wg.Add(1)
+			go func(f string) {
+				limit <- struct{}{}
+				fmt.Printf("[+] %s\n", f)
+				syncCmdGetFile(httpClient, *u, f)
+				<-limit
+				wg.Done()
+			}(file)
+		}
+		wg.Wait()
+
+		for _, file := range dump {
+			fmt.Printf("[-] %s\n", file)
+			if err := os.RemoveAll(filepath.Join(flag.Args()[1], file)); err != nil {
+				fmt.Println(err)
+			}
+		}
+
+		if *syncExec != "" && ((len(need) > 0) || (len(dump) > 0)) {
+			parts, err := shlex.Split(*syncExec)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Could not exec cmd: %s\n", err)
+				return 1
+			}
+			cmd := exec.Command(parts[0], parts[1:]...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil && errors.Is(err, &exec.ExitError{}) {
+				exitError := err.(*exec.ExitError)
+				fmt.Fprintf(os.Stderr, "Command did not complete successfully: %s\n", err)
+				return exitError.ExitCode()
+			} else if err != nil {
+				fmt.Fprintf(os.Stderr, "Command did not complete successfully: %s\n", err)
+				return 255
+			}
+		}
+		return 0
+	}())
 }
 
 func syncCmdGetFile(c http.Client, tu url.URL, file string) {
