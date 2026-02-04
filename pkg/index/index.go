@@ -53,8 +53,8 @@ func (i *Indexer) walkDir(path string, d fs.DirEntry, err error) error {
 		return nil
 	}
 
-	go i.handleFile(path, d)
 	i.idx.wg.Add(1)
+	go i.handleFile(path, d)
 	return nil
 }
 
