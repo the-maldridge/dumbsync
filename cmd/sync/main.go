@@ -85,13 +85,15 @@ func main() {
 		}
 		i.PruneFile(filepath.Join(flag.Args()[1], *syncFileName))
 
-		need, dump := i.ComputeDifference(sidx)
-		sort.Strings(need)
-		sort.Strings(dump)
+		added, removed, changed := i.ComputeDifference(sidx)
+		sort.Strings(added)
+		sort.Strings(removed)
+		sort.Strings(changed)
 
 		var wg sync.WaitGroup
+
 		limit := make(chan struct{}, *syncThreads)
-		for _, file := range need {
+		for _, file := range added {
 			wg.Add(1)
 			go func(f string) {
 				limit <- struct{}{}
@@ -103,14 +105,26 @@ func main() {
 		}
 		wg.Wait()
 
-		for _, file := range dump {
+		for _, file := range changed {
+			wg.Add(1)
+			go func(f string) {
+				limit <- struct{}{}
+				fmt.Printf("[~] %s\n", f)
+				syncCmdGetFile(httpClient, *u, f)
+				<-limit
+				wg.Done()
+			}(file)
+		}
+		wg.Wait()
+
+		for _, file := range removed {
 			fmt.Printf("[-] %s\n", file)
 			if err := os.RemoveAll(filepath.Join(flag.Args()[1], file)); err != nil {
 				fmt.Println(err)
 			}
 		}
 
-		if *syncExec != "" && ((len(need) > 0) || (len(dump) > 0)) {
+		if *syncExec != "" && ((len(added) > 0) || (len(changed) > 0) || (len(removed) > 0)) {
 			parts, err := shlex.Split(*syncExec)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Could not exec cmd: %s\n", err)
