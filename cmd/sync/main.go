@@ -29,6 +29,7 @@ var (
 	syncCertFile     = flag.String("cert", "", "Client Certificate")
 	syncCertKeyFile  = flag.String("key", "", "Client Key")
 	syncExec         = flag.String("exec", "", "Execute a command when files are changed")
+	syncDelayChanges = flag.Bool("delay-changes", false, "Atomically update files after downloads")
 )
 
 func main() {
@@ -105,17 +106,36 @@ func main() {
 		}
 		wg.Wait()
 
+		type tempfile struct {
+			tmp, dst string
+		}
+		var tempfiles []tempfile
 		for _, file := range changed {
 			wg.Add(1)
 			go func(f string) {
 				limit <- struct{}{}
 				fmt.Printf("[~] %s\n", f)
-				syncCmdGetFile(httpClient, *u, f)
+				if *syncDelayChanges {
+					tmp, dst, err := syncCmdGetFileTemp(httpClient, *u, f)
+					if err != nil {
+						return
+					}
+					tempfiles = append(tempfiles, tempfile{tmp, dst})
+				} else {
+					syncCmdGetFile(httpClient, *u, f)
+				}
 				<-limit
 				wg.Done()
 			}(file)
 		}
 		wg.Wait()
+
+		for _, t := range tempfiles {
+			if err := os.Rename(t.tmp, t.dst); err != nil {
+				fmt.Println(err)
+				os.Remove(t.tmp)
+			}
+		}
 
 		for _, file := range removed {
 			fmt.Printf("[-] %s\n", file)
@@ -165,4 +185,41 @@ func syncCmdGetFile(c http.Client, tu url.URL, file string) {
 	io.Copy(f, resp.Body)
 	f.Close()
 	resp.Body.Close()
+}
+
+func syncCmdGetFileTemp(c http.Client, tu url.URL, file string) (string, string, error) {
+	tu.Path = path.Join(tu.Path, file)
+	resp, err := c.Get(tu.String())
+	if err != nil {
+		fmt.Println(err)
+		return "", "", err
+	}
+	dir := filepath.Dir(filepath.Join(flag.Args()[1], file))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Println(err)
+	}
+
+	f, err := os.CreateTemp(dir, ".dumbsync.XXXXXXX")
+	if err != nil {
+		fmt.Println(err)
+		return "", "", err
+	}
+	_, err1 := io.Copy(f, resp.Body)
+	if err1 != nil {
+		fmt.Println(err1)
+	}
+	err2 := f.Close()
+	if err2 != nil {
+		fmt.Println(err2)
+	}
+	err3 := resp.Body.Close()
+	if err3 != nil {
+		fmt.Println(err3)
+	}
+	if err1 != nil || err2 != nil || err3 != nil {
+		os.Remove(f.Name())
+		return "", "", err
+	}
+	target := filepath.Join(flag.Args()[1], file)
+	return f.Name(), target, nil
 }
