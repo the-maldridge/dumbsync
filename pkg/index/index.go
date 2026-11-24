@@ -3,7 +3,7 @@ package index
 import (
 	"bytes"
 	"crypto/md5"
-	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"io/fs"
@@ -17,14 +17,14 @@ import (
 
 // IndexPath walks the directory structure below basepath and
 // generates an index.
+//
+// basepath names a directory on the local system and is interpreted
+// by the operating system, so it may be absolute or relative.  The
+// keys it produces are always relative to basepath and use forward
+// slashes; nothing below here accepts a rooted path.
 func (i *Indexer) IndexPath(basepath string) (*Index, error) {
-	if !fs.ValidPath(basepath) {
-		return nil, errors.New("path must be unrooted, cannot start or end with /, cannot contain ..")
-	}
-
-	i.basepath = basepath
 	i.idx = &Index{Files: make(map[string][]byte), Mutex: new(sync.Mutex)}
-	i.idx.fs = os.DirFS(i.basepath)
+	i.idx.fs = os.DirFS(basepath)
 
 	switch strings.ToUpper(os.Getenv("DUMBSYNC_HASH")) {
 	case "MD5":
@@ -84,9 +84,18 @@ func (i *Indexer) handleFile(path string, d fs.DirEntry) {
 	i.idx.Unlock()
 }
 
-// PruneFile can be used to remove a file from the index directly.
-func (i *Indexer) PruneFile(file string) {
+// PruneFile removes a file from the index by its key, which must be
+// relative to the tree that was indexed.  Roots belong to IndexPath,
+// so a name that could never be a key, for example one that is
+// absolute, contains .., or uses the native separator, is reported
+// instead of silently matching nothing.
+func (i *Indexer) PruneFile(file string) error {
+	if !fs.ValidPath(file) {
+		return fmt.Errorf("%q is not a key relative to the indexed tree", file)
+	}
+
 	delete(i.idx.Files, file)
+	return nil
 }
 
 // ComputeDifference works out what is missing locally from the target

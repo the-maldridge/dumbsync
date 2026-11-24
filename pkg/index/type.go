@@ -8,8 +8,6 @@ import (
 // An Indexer handles indexing.
 type Indexer struct {
 	idx *Index
-
-	basepath string
 }
 
 // Index is a listing of files and their hashes which allows you to

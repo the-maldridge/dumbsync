@@ -84,7 +84,10 @@ func main() {
 			fmt.Println(err)
 			return 1
 		}
-		i.PruneFile(filepath.Join(flag.Args()[1], *syncFileName))
+		if err := i.PruneFile(*syncFileName); err != nil {
+			fmt.Println(err)
+			return 2
+		}
 
 		added, removed, changed := i.ComputeDifference(sidx)
 		sort.Strings(added)
