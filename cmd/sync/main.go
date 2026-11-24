@@ -1,3 +1,5 @@
+// dumbsync brings a destination directory in line with a tree published
+// elsewhere over HTTP.
 package main
 
 import (
@@ -6,21 +8,33 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/google/shlex"
 
+	"github.com/the-maldridge/dumbsync/pkg/httpfs"
 	"github.com/the-maldridge/dumbsync/pkg/index"
+	dsync "github.com/the-maldridge/dumbsync/pkg/sync"
+	"github.com/the-maldridge/dumbsync/pkg/tree"
 )
+
+// marker is written into a destination so that a later run can tell a
+// directory dumbsync synced from one it was pointed at by mistake.
+const marker = ".dumbsync-managed"
+
+const markerContents = `This file marks a directory as one dumbsync synchronizes.
+
+Without it dumbsync refuses to run with -delete, so that pointing -delete
+at a directory that was never a destination cannot take it apart. Delete
+this file to hand the directory back.
+`
 
 var (
 	syncFetchTimeout = flag.Duration("timeout", time.Second*10, "Timeout for file acquisition")
@@ -30,199 +44,265 @@ var (
 	syncCertKeyFile  = flag.String("key", "", "Client Key")
 	syncExec         = flag.String("exec", "", "Execute a command when files are changed")
 	syncDelayChanges = flag.Bool("delay-changes", false, "Atomically update files after downloads")
+	syncDelete       = flag.Bool("delete", false, "Remove files the source no longer has")
 )
 
+// usageError reports a command invoked in a way that cannot be acted
+// on, as opposed to a source that could not be reached or a file that
+// could not be written.
+type usageError struct {
+	msg string
+}
+
+func (e *usageError) Error() string { return e.msg }
+
+func usagef(format string, a ...any) error {
+	return &usageError{msg: fmt.Sprintf(format, a...)}
+}
+
 func main() {
-	os.Exit(func() int {
-		flag.Parse()
-		if len(flag.Args()) != 2 {
-			fmt.Fprintln(os.Stderr, "Usage: dumbsync <url> <path>")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "You must specify a URL to sync from, and a path to sync to!")
-			return 2
-		}
-
-		httpClient := http.Client{Timeout: *syncFetchTimeout}
-
-		if *syncCertFile != "" && *syncCertKeyFile != "" {
-			cert, err := tls.LoadX509KeyPair(*syncCertFile, *syncCertKeyFile)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading client certificate: %s\n", err)
-				return 2
-			}
-
-			httpClient.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
-			}
-		}
-
-		u, err := url.Parse(flag.Args()[0])
-		if err != nil {
-			fmt.Println(err)
-			return 2
-		}
-		du := *u
-		du.Path = path.Join(du.Path, *syncFileName)
-
-		fmt.Printf("Synchronizing against %s\n", du.String())
-		resp, err := httpClient.Get(du.String())
-		if err != nil {
-			fmt.Println(err)
-			return 1
-		}
-		defer resp.Body.Close()
-
-		sidx := new(index.Index)
-		dec := json.NewDecoder(resp.Body)
-		if err := dec.Decode(sidx); err != nil {
-			fmt.Println(err)
-			return 1
-		}
-
-		i := new(index.Indexer)
-		if _, err := i.IndexPath(flag.Args()[1]); err != nil {
-			fmt.Println(err)
-			return 1
-		}
-		if err := i.PruneFile(*syncFileName); err != nil {
-			fmt.Println(err)
-			return 2
-		}
-
-		added, removed, changed := i.ComputeDifference(sidx)
-		sort.Strings(added)
-		sort.Strings(removed)
-		sort.Strings(changed)
-
-		var wg sync.WaitGroup
-
-		limit := make(chan struct{}, *syncThreads)
-		for _, file := range added {
-			wg.Add(1)
-			go func(f string) {
-				limit <- struct{}{}
-				fmt.Printf("[+] %s\n", f)
-				syncCmdGetFile(httpClient, *u, f)
-				<-limit
-				wg.Done()
-			}(file)
-		}
-		wg.Wait()
-
-		type tempfile struct {
-			tmp, dst string
-		}
-		var tempfiles []tempfile
-		for _, file := range changed {
-			wg.Add(1)
-			go func(f string) {
-				limit <- struct{}{}
-				fmt.Printf("[~] %s\n", f)
-				if *syncDelayChanges {
-					tmp, dst, err := syncCmdGetFileTemp(httpClient, *u, f)
-					if err != nil {
-						return
-					}
-					tempfiles = append(tempfiles, tempfile{tmp, dst})
-				} else {
-					syncCmdGetFile(httpClient, *u, f)
-				}
-				<-limit
-				wg.Done()
-			}(file)
-		}
-		wg.Wait()
-
-		for _, t := range tempfiles {
-			if err := os.Rename(t.tmp, t.dst); err != nil {
-				fmt.Println(err)
-				os.Remove(t.tmp)
-			}
-		}
-
-		for _, file := range removed {
-			fmt.Printf("[-] %s\n", file)
-			if err := os.RemoveAll(filepath.Join(flag.Args()[1], file)); err != nil {
-				fmt.Println(err)
-			}
-		}
-
-		if *syncExec != "" && ((len(added) > 0) || (len(changed) > 0) || (len(removed) > 0)) {
-			parts, err := shlex.Split(*syncExec)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Could not exec cmd: %s\n", err)
-				return 1
-			}
-			cmd := exec.Command(parts[0], parts[1:]...)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil && errors.Is(err, &exec.ExitError{}) {
-				exitError := err.(*exec.ExitError)
-				fmt.Fprintf(os.Stderr, "Command did not complete successfully: %s\n", err)
-				return exitError.ExitCode()
-			} else if err != nil {
-				fmt.Fprintf(os.Stderr, "Command did not complete successfully: %s\n", err)
-				return 255
-			}
-		}
-		return 0
-	}())
+	os.Exit(run())
 }
 
-func syncCmdGetFile(c http.Client, tu url.URL, file string) {
-	tu.Path = path.Join(tu.Path, file)
-	resp, err := c.Get(tu.String())
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(filepath.Join(flag.Args()[1], file)), 0755); err != nil {
-		fmt.Println(err)
+func run() int {
+	flag.Parse()
+	if flag.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "Usage: dumbsync <url> <path>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "You must specify a URL to sync from, and a path to sync to!")
+		return 2
 	}
 
-	f, err := os.Create(filepath.Join(flag.Args()[1], file))
+	dest, err := tree.Open(flag.Arg(1))
 	if err != nil {
-		fmt.Println(err)
-		return
+		fmt.Fprintf(os.Stderr, "Could not use %s as a destination: %s\n", flag.Arg(1), err)
+		return 1
 	}
-	io.Copy(f, resp.Body)
-	f.Close()
-	resp.Body.Close()
+	defer dest.Close()
+
+	owned, err := claim(dest)
+	if err != nil {
+		return fail(err)
+	}
+
+	source, err := openSource(flag.Arg(0))
+	if err != nil {
+		return fail(err)
+	}
+
+	report, syncErr := dsync.Sync(dsync.Options{
+		Source:  source,
+		Target:  dest,
+		Hash:    index.HashTypeFromEnv(),
+		Exclude: append(owned, *syncFileName),
+		Threads: *syncThreads,
+		Atomic:  *syncDelayChanges,
+		Delete:  *syncDelete,
+		Progress: func(e dsync.Event) {
+			fmt.Printf("%s %s\n", action[e.Kind], e.Key)
+		},
+	})
+
+	failed := make([]string, 0, len(report.Failed))
+	for key := range report.Failed {
+		failed = append(failed, key)
+	}
+	sort.Strings(failed)
+	for _, key := range failed {
+		fmt.Fprintf(os.Stderr, "Failed to synchronize %s: %s\n", key, report.Failed[key])
+	}
+
+	if len(report.Leftover) > 0 {
+		if *syncDelete {
+			fmt.Printf("Kept %d file(s) the source no longer has, because it could not be read completely\n", len(report.Leftover))
+		} else {
+			fmt.Printf("Kept %d file(s) the source no longer has, pass -delete to remove them\n", len(report.Leftover))
+		}
+	}
+
+	if syncErr != nil {
+		if errors.Is(syncErr, dsync.ErrIncomplete) {
+			// Anything the source could not be read is a file whose
+			// absence means nothing, so say so loudly rather than
+			// letting a quiet exit imply the trees now match.
+			fmt.Fprintln(os.Stderr, "Warning: the source could not be read completely, the destination may be out of date:", syncErr)
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, syncErr)
+		return 1
+	}
+
+	if len(failed) > 0 {
+		return 1
+	}
+
+	if *syncExec != "" && !report.Empty() {
+		return hook(*syncExec)
+	}
+
+	return 0
 }
 
-func syncCmdGetFileTemp(c http.Client, tu url.URL, file string) (string, string, error) {
-	tu.Path = path.Join(tu.Path, file)
-	resp, err := c.Get(tu.String())
-	if err != nil {
-		fmt.Println(err)
-		return "", "", err
-	}
-	dir := filepath.Dir(filepath.Join(flag.Args()[1], file))
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Println(err)
+// action is how each kind of work is reported, kept as the marks long
+// standing scripts of ours already parse.
+var action = map[dsync.EventKind]string{
+	dsync.Added:   "[+]",
+	dsync.Changed: "[~]",
+	dsync.Removed: "[-]",
+}
+
+// fail reports an error and returns the status to exit with, which is
+// the usage status for a complaint about the invocation and a general
+// failure for anything else.
+func fail(err error) int {
+	fmt.Fprintln(os.Stderr, err)
+
+	var usage *usageError
+	if errors.As(err, &usage) {
+		return 2
 	}
 
-	f, err := os.CreateTemp(dir, ".dumbsync.XXXXXXX")
+	return 1
+}
+
+// claim notes the files the destination owns for itself, which are
+// neither compared with the source nor removed for it, and marks the
+// directory as a destination so that a later -delete run may remove
+// files from it.
+//
+// A directory that already holds work of somebody else's is not marked,
+// which is what keeps -delete from wiping a path that was misspelled or
+// aimed somewhere it should not have been.
+func claim(dest tree.Tree) ([]string, error) {
+	_, err := fs.Stat(dest.FS(), marker)
+	switch {
+	case err == nil:
+		return []string{marker}, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("Could not inspect %s: %s", dest.Name(), err)
+	}
+
+	if *syncDelete {
+		entries, err := fs.ReadDir(dest.FS(), ".")
+		if err != nil {
+			return nil, fmt.Errorf("Could not inspect %s: %s", dest.Name(), err)
+		}
+		if len(entries) > 0 {
+			return nil, usagef("%s holds files dumbsync did not put there, so it will not be deleted from. Run once without -delete to take it over", dest.Name())
+		}
+	}
+
+	f, err := dest.OpenWrite(marker)
 	if err != nil {
-		fmt.Println(err)
-		return "", "", err
+		return nil, fmt.Errorf("Could not mark %s as a dumbsync destination: %s", dest.Name(), err)
 	}
-	_, err1 := io.Copy(f, resp.Body)
-	if err1 != nil {
-		fmt.Println(err1)
+	defer f.Close()
+
+	if _, err := f.Write([]byte(markerContents)); err != nil {
+		return nil, fmt.Errorf("Could not mark %s as a dumbsync destination: %s", dest.Name(), err)
 	}
-	err2 := f.Close()
-	if err2 != nil {
-		fmt.Println(err2)
+
+	return []string{marker}, nil
+}
+
+// openSource returns the tree named by source.
+func openSource(source string) (fs.FS, error) {
+	u, err := url.Parse(source)
+	if err != nil {
+		return nil, usagef("%s", err)
 	}
-	err3 := resp.Body.Close()
-	if err3 != nil {
-		fmt.Println(err3)
+
+	switch u.Scheme {
+	case "http", "https":
+		return published(u)
+	default:
+		return nil, usagef("cannot sync from a %s URL", u.Scheme)
 	}
-	if err1 != nil || err2 != nil || err3 != nil {
-		os.Remove(f.Name())
-		return "", "", err
+}
+
+// published reads the index a server publishes and returns the tree it
+// describes, so that names and hashes are known before any content is
+// fetched.
+func published(u *url.URL) (fs.FS, error) {
+	client, err := httpClient()
+	if err != nil {
+		return nil, err
 	}
-	target := filepath.Join(flag.Args()[1], file)
-	return f.Name(), target, nil
+
+	manifest := *u
+	manifest.Path = path.Join(manifest.Path, *syncFileName)
+
+	fmt.Printf("Synchronizing against %s\n", manifest.String())
+
+	resp, err := client.Get(manifest.String())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: %s", manifest.String(), resp.Status)
+	}
+
+	idx := new(index.Index)
+	if err := json.NewDecoder(resp.Body).Decode(idx); err != nil {
+		return nil, fmt.Errorf("%s is not a dumbsync index: %s", manifest.String(), err)
+	}
+
+	return httpfs.New(client, u.String(), idx)
+}
+
+// httpClient builds the client used for the whole run. The default
+// transport is copied rather than replaced, so that a client
+// certificate costs the pooling and proxy handling every other request
+// would have had.
+func httpClient() (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+
+	if *syncCertFile != "" || *syncCertKeyFile != "" {
+		if *syncCertFile == "" || *syncCertKeyFile == "" {
+			return nil, usagef("a client certificate needs both -cert and -key")
+		}
+
+		cert, err := tls.LoadX509KeyPair(*syncCertFile, *syncCertKeyFile)
+		if err != nil {
+			return nil, usagef("%s", err)
+		}
+
+		transport.TLSClientConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
+
+	return &http.Client{Timeout: *syncFetchTimeout, Transport: transport}, nil
+}
+
+// hook runs the command asked for after files changed, and returns the
+// status the caller should exit with.
+func hook(command string) int {
+	parts, err := shlex.Split(command)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not exec cmd: %s\n", err)
+		return 1
+	}
+	if len(parts) == 0 {
+		fmt.Fprintf(os.Stderr, "Could not exec cmd: nothing to run\n")
+		return 1
+	}
+
+	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Command did not complete successfully: %s\n", err)
+
+		// The command ran and chose its own status; only a dumbsync
+		// that could not start it at all gets a made up one.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		return 255
+	}
+
+	return 0
 }
