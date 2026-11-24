@@ -1,5 +1,6 @@
-// dumbsync brings a destination directory in line with a tree published
-// elsewhere over HTTP.
+// dumbsync brings a destination directory in line with a tree, whether
+// that tree is published over HTTP by dumbsync-index or is simply
+// another directory on this machine.
 package main
 
 import (
@@ -67,9 +68,10 @@ func main() {
 func run() int {
 	flag.Parse()
 	if flag.NArg() != 2 {
-		fmt.Fprintln(os.Stderr, "Usage: dumbsync <url> <path>")
+		fmt.Fprintln(os.Stderr, "Usage: dumbsync <source> <destination>")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "You must specify a URL to sync from, and a path to sync to!")
+		fmt.Fprintln(os.Stderr, "The source is a URL published by dumbsync-index, or a directory on")
+		fmt.Fprintln(os.Stderr, "this machine given as a path or a file:// URL.")
 		return 2
 	}
 
@@ -205,7 +207,7 @@ func claim(dest tree.Tree) ([]string, error) {
 	return []string{marker}, nil
 }
 
-// openSource returns the tree named by source.
+// openSource returns the tree named by source, from wherever it is.
 func openSource(source string) (fs.FS, error) {
 	u, err := url.Parse(source)
 	if err != nil {
@@ -215,9 +217,32 @@ func openSource(source string) (fs.FS, error) {
 	switch u.Scheme {
 	case "http", "https":
 		return published(u)
+	case "", "file":
+		return directory(u)
 	default:
 		return nil, usagef("cannot sync from a %s URL", u.Scheme)
 	}
+}
+
+// directory returns a tree on this machine. The name is a path rather
+// than a URL, so a plain directory name is enough and no one has to
+// write file:// in front of it to get the same code.
+func directory(u *url.URL) (fs.FS, error) {
+	if u.Scheme == "file" && u.Host != "" && u.Host != "localhost" {
+		return nil, usagef("a file URL names a directory on this machine, %q goes nowhere it can reach", u.Host)
+	}
+
+	info, err := os.Stat(u.Path)
+	if err != nil {
+		return nil, fmt.Errorf("%s could not be read as a tree: %s", u.Path, err)
+	}
+	if !info.IsDir() {
+		return nil, usagef("%s is not a directory", u.Path)
+	}
+
+	fmt.Printf("Synchronizing against %s\n", u.Path)
+
+	return os.DirFS(u.Path), nil
 }
 
 // published reads the index a server publishes and returns the tree it
