@@ -136,8 +136,13 @@ func (w *walker) problem(name string, err error) {
 }
 
 // hasher returns a hash for the algorithm recorded in the index.
-func (idx *Index) hasher() hash.Hash {
-	if idx.HashType == XXHash {
+func (idx *Index) hasher() hash.Hash { return NewHash(idx.HashType) }
+
+// NewHash returns a hash for the given algorithm. Anyone writing a file
+// for this package should hash the bytes on their way through so that
+// what landed can be compared with what the source said it would be.
+func NewHash(t HashType) hash.Hash {
+	if t == XXHash {
 		return xxhash.New()
 	}
 	return md5.New()
