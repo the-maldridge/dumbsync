@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestComputeDifference(t *testing.T) {
+func TestDifference(t *testing.T) {
 	local := Index{Files: map[string][]byte{
 		"a": []byte("deadbeef"),
 		"b": []byte("deadbeef"),
@@ -38,7 +38,7 @@ func TestComputeDifference(t *testing.T) {
 	}
 }
 
-func TestIndexPathKeysAreRelativeToTheRoot(t *testing.T) {
+func TestIndexFSKeysAreRelativeToTheRoot(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"top.txt", "sub/nested.txt"} {
 		write(t, root, name, name)
@@ -47,38 +47,16 @@ func TestIndexPathKeysAreRelativeToTheRoot(t *testing.T) {
 	// A root is an operating system path, so absolute roots and roots
 	// with a trailing separator are both acceptable and must produce
 	// the same relative keys.
-	for _, root := range []string{root, root + string(os.PathSeparator)} {
-		i := new(Indexer)
-		idx, err := i.IndexPath(root)
+	for _, dir := range []string{root, root + string(os.PathSeparator)} {
+		idx, err := IndexFS(os.DirFS(dir), Options{})
 		if err != nil {
-			t.Fatalf("IndexPath(%q): %v", root, err)
+			t.Fatalf("IndexFS(os.DirFS(%q)): %v", dir, err)
 		}
 
 		want := []string{"sub/nested.txt", "top.txt"}
 		if got := sortedKeys(idx); !reflect.DeepEqual(got, want) {
-			t.Errorf("IndexPath(%q) keys = %v, want %v", root, got, want)
+			t.Errorf("os.DirFS(%q) keys = %v, want %v", dir, got, want)
 		}
-	}
-}
-
-func TestPruneFileRejectsNonKeys(t *testing.T) {
-	i := new(Indexer)
-	if _, err := i.IndexPath(t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	i.idx.Files["keep.txt"] = []byte("deadbeef")
-
-	for _, name := range []string{"/keep.txt", "../keep.txt", "./keep.txt", "keep.txt/", ""} {
-		if err := i.PruneFile(name); err == nil {
-			t.Errorf("PruneFile(%q) accepted a name that cannot be a key", name)
-		}
-	}
-
-	if err := i.PruneFile("keep.txt"); err != nil {
-		t.Errorf("PruneFile(keep.txt): %v", err)
-	}
-	if len(i.idx.Files) != 0 {
-		t.Errorf("PruneFile left %v in the index", i.idx.Files)
 	}
 }
 
@@ -91,7 +69,7 @@ func sortedKeys(idx *Index) []string {
 	return keys
 }
 
-func TestIndexPathBoundedPoolStillIndexesEverything(t *testing.T) {
+func TestBoundedPoolStillIndexesEverything(t *testing.T) {
 	root := t.TempDir()
 	const files = 200
 
@@ -102,8 +80,7 @@ func TestIndexPathBoundedPoolStillIndexesEverything(t *testing.T) {
 		want = append(want, name)
 	}
 
-	i := new(Indexer)
-	idx, err := i.IndexPath(root)
+	idx, err := IndexFS(os.DirFS(root), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,10 +105,9 @@ func TestUnreadableFileMarksTheIndexIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	i := new(Indexer)
-	idx, err := i.IndexPath(root)
+	idx, err := IndexFS(os.DirFS(root), Options{})
 	if err != nil {
-		t.Fatalf("IndexPath should report read failures on the index, not fail the walk: %v", err)
+		t.Fatalf("IndexFS should report read failures on the index, not fail the walk: %v", err)
 	}
 
 	if !idx.Incomplete {
@@ -166,8 +142,7 @@ func TestCleanTreeIsComplete(t *testing.T) {
 	write(t, root, "one.txt", "one")
 	write(t, root, "dir/two.txt", "two")
 
-	i := new(Indexer)
-	idx, err := i.IndexPath(root)
+	idx, err := IndexFS(os.DirFS(root), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
