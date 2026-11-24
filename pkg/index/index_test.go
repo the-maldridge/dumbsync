@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -93,4 +94,33 @@ func sortedKeys(idx *Index) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func TestIndexPathBoundedPoolStillIndexesEverything(t *testing.T) {
+	root := t.TempDir()
+	const files = 200
+
+	want := make([]string, 0, files)
+	for n := range files {
+		name := fmt.Sprintf("dir%02d/file%03d.txt", n%7, n)
+		full := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, name)
+	}
+
+	i := new(Indexer)
+	idx, err := i.IndexPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sort.Strings(want)
+	if got := sortedKeys(idx); !reflect.DeepEqual(got, want) {
+		t.Errorf("indexed %d files, want %d", len(got), len(want))
+	}
 }

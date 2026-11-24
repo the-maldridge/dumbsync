@@ -2,17 +2,9 @@ package index
 
 import (
 	"bytes"
-	"crypto/md5"
 	"fmt"
-	"hash"
-	"io"
 	"io/fs"
-	"log"
 	"os"
-	"strings"
-	"sync"
-
-	"github.com/cespare/xxhash/v2"
 )
 
 // IndexPath walks the directory structure below basepath and
@@ -23,65 +15,9 @@ import (
 // keys it produces are always relative to basepath and use forward
 // slashes; nothing below here accepts a rooted path.
 func (i *Indexer) IndexPath(basepath string) (*Index, error) {
-	i.idx = &Index{Files: make(map[string][]byte), Mutex: new(sync.Mutex)}
-	i.idx.fs = os.DirFS(basepath)
-
-	switch strings.ToUpper(os.Getenv("DUMBSYNC_HASH")) {
-	case "MD5":
-		i.idx.HashType = MD5
-	case "XX":
-		i.idx.HashType = XXHash
-	default:
-		i.idx.HashType = MD5
-	}
-
-	if err := fs.WalkDir(i.idx.fs, ".", i.walkDir); err != nil {
-		return new(Index), err
-	}
-
-	i.idx.wg.Wait()
-	return i.idx, nil
-}
-
-func (i *Indexer) walkDir(path string, d fs.DirEntry, err error) error {
-	if err != nil {
-		log.Println(err)
-		return nil
-	}
-
-	if d.IsDir() {
-		return nil
-	}
-
-	i.idx.wg.Add(1)
-	go i.handleFile(path, d)
-	return nil
-}
-
-func (i *Indexer) handleFile(path string, d fs.DirEntry) {
-	defer i.idx.wg.Done()
-	f, err := i.idx.fs.Open(path)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	defer f.Close()
-
-	var h hash.Hash
-	switch i.idx.HashType {
-	case MD5:
-		h = md5.New()
-	case XXHash:
-		h = xxhash.New()
-	}
-	if _, err := io.Copy(h, f); err != nil {
-		return
-	}
-	f.Close()
-
-	i.idx.Lock()
-	i.idx.Files[path] = h.Sum(nil)
-	i.idx.Unlock()
+	idx, err := indexFS(os.DirFS(basepath))
+	i.idx = idx
+	return idx, err
 }
 
 // PruneFile removes a file from the index by its key, which must be

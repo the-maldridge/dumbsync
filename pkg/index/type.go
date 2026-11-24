@@ -1,7 +1,6 @@
 package index
 
 import (
-	"io/fs"
 	"sync"
 )
 
@@ -18,8 +17,6 @@ type Index struct {
 	HashType HashType
 
 	*sync.Mutex
-	wg sync.WaitGroup
-	fs fs.FS
 }
 
 // HashType stores what kind of hash was used to validate the data.
