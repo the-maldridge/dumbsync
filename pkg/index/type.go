@@ -4,11 +4,6 @@ import (
 	"sync"
 )
 
-// An Indexer handles indexing.
-type Indexer struct {
-	idx *Index
-}
-
 // Index is a listing of files and their hashes which allows you to
 // determine whether a file is out of date.  The Index is flat, and
 // you must parse paths to do subdirectories.

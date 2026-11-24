@@ -23,7 +23,7 @@ func TestComputeDifference(t *testing.T) {
 		"d": []byte("deadbeef"),
 		"e": []byte("deadbeef"),
 	}}
-	added, removed, changed := local.computeDifference(&remote)
+	added, removed, changed := local.Difference(&remote)
 	if len(added) != 1 || len(removed) != 1 || len(changed) != 1 {
 		t.Fatal()
 	}

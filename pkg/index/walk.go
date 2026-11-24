@@ -7,8 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"os"
-	"strings"
 	"sync"
 
 	"github.com/cespare/xxhash/v2"
@@ -24,19 +22,21 @@ const workers = 16
 // the list has to stay small enough to be worth transferring.
 const maxProblems = 32
 
-// indexFS hashes every file below fsys and returns an Index describing
-// the tree.  Names in the resulting Index are relative to fsys.
-func indexFS(fsys fs.FS) (*Index, error) {
+// walk hashes every file below fsys into an index, skipping the keys in
+// exclude.  The index records its algorithm so the far end can hash the
+// way this end did.
+func walk(fsys fs.FS, hashType HashType, exclude map[string]bool) (*Index, error) {
 	idx := &Index{
 		Files:    make(map[string][]byte),
-		HashType: hashTypeFromEnv(),
+		HashType: hashType,
 		Mutex:    new(sync.Mutex),
 	}
 
 	w := &walker{
-		idx:   idx,
-		fs:    fsys,
-		slots: make(chan struct{}, workers),
+		idx:     idx,
+		fs:      fsys,
+		exclude: exclude,
+		slots:   make(chan struct{}, workers),
 	}
 
 	err := fs.WalkDir(fsys, ".", w.visit)
@@ -53,10 +53,11 @@ func indexFS(fsys fs.FS) (*Index, error) {
 
 // walker hashes the files found by a directory walk.
 type walker struct {
-	idx   *Index
-	fs    fs.FS
-	wg    sync.WaitGroup
-	slots chan struct{}
+	idx     *Index
+	fs      fs.FS
+	exclude map[string]bool
+	wg      sync.WaitGroup
+	slots   chan struct{}
 }
 
 func (w *walker) visit(name string, d fs.DirEntry, err error) error {
@@ -67,6 +68,13 @@ func (w *walker) visit(name string, d fs.DirEntry, err error) error {
 	}
 
 	if d.IsDir() {
+		if w.excluded(name) {
+			return fs.SkipDir
+		}
+		return nil
+	}
+
+	if w.excluded(name) {
 		return nil
 	}
 
@@ -82,6 +90,16 @@ func (w *walker) visit(name string, d fs.DirEntry, err error) error {
 	}()
 
 	return nil
+}
+
+func (w *walker) excluded(name string) bool {
+	if len(w.exclude) == 0 {
+		return false
+	}
+
+	// The root of the walk is never excluded, otherwise the whole tree
+	// would disappear along with the name used to describe it.
+	return name != "." && w.exclude[name]
 }
 
 func (w *walker) hashFile(name string) {
@@ -123,16 +141,4 @@ func (idx *Index) hasher() hash.Hash {
 		return xxhash.New()
 	}
 	return md5.New()
-}
-
-// hashTypeFromEnv reads the algorithm to hash with from DUMBSYNC_HASH,
-// which is how an operator chooses between the two supported hashes
-// without reconfiguring the tree being indexed.
-func hashTypeFromEnv() HashType {
-	switch strings.ToUpper(os.Getenv("DUMBSYNC_HASH")) {
-	case "XX":
-		return XXHash
-	default:
-		return MD5
-	}
 }
