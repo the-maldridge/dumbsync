@@ -2,6 +2,7 @@ package index
 
 import (
 	"crypto/md5"
+	"fmt"
 	"hash"
 	"io"
 	"io/fs"
@@ -18,6 +19,11 @@ import (
 // which is the first thing to fail on a large index.
 const workers = 16
 
+// maxProblems bounds how many read failures a single index records.
+// Problems travel to the far end of a sync inside the index itself, so
+// the list has to stay small enough to be worth transferring.
+const maxProblems = 32
+
 // indexFS hashes every file below fsys and returns an Index describing
 // the tree.  Names in the resulting Index are relative to fsys.
 func indexFS(fsys fs.FS) (*Index, error) {
@@ -33,12 +39,16 @@ func indexFS(fsys fs.FS) (*Index, error) {
 		slots: make(chan struct{}, workers),
 	}
 
-	if err := fs.WalkDir(fsys, ".", w.visit); err != nil {
-		return new(Index), err
-	}
+	err := fs.WalkDir(fsys, ".", w.visit)
 	w.wg.Wait()
+	if err != nil {
+		// Mark the partial result unusable for deletions so that a
+		// caller which ignores the error still cannot remove anything
+		// with it.
+		w.problem(".", err)
+	}
 
-	return idx, nil
+	return idx, err
 }
 
 // walker hashes the files found by a directory walk.
@@ -52,6 +62,7 @@ type walker struct {
 func (w *walker) visit(name string, d fs.DirEntry, err error) error {
 	if err != nil {
 		log.Println(err)
+		w.problem(name, err)
 		return nil
 	}
 
@@ -77,6 +88,7 @@ func (w *walker) hashFile(name string) {
 	f, err := w.fs.Open(name)
 	if err != nil {
 		log.Println(err)
+		w.problem(name, err)
 		return
 	}
 	defer f.Close()
@@ -84,12 +96,25 @@ func (w *walker) hashFile(name string) {
 	h := w.idx.hasher()
 	if _, err := io.Copy(h, f); err != nil {
 		log.Println(err)
+		w.problem(name, err)
 		return
 	}
 
 	w.idx.Lock()
 	w.idx.Files[name] = h.Sum(nil)
 	w.idx.Unlock()
+}
+
+// problem records that part of the tree could not be read, which makes
+// the index unsafe to treat as a complete description of the tree.
+func (w *walker) problem(name string, err error) {
+	w.idx.Lock()
+	defer w.idx.Unlock()
+
+	w.idx.Incomplete = true
+	if len(w.idx.Errors) < maxProblems {
+		w.idx.Errors = append(w.idx.Errors, fmt.Sprintf("%s: %v", name, err))
+	}
 }
 
 // hasher returns a hash for the algorithm recorded in the index.

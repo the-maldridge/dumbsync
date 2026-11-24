@@ -16,6 +16,18 @@ type Index struct {
 	Files    map[string][]byte
 	HashType HashType
 
+	// Incomplete is set when part of the tree could not be read while
+	// the index was being built.  A missing entry in an incomplete
+	// index does not prove that the file is gone, so such an index must
+	// never be used to decide what to delete.  Indexes written before
+	// this field existed decode as complete, which leaves their
+	// behaviour unchanged.
+	Incomplete bool
+
+	// Errors holds a short description of the read failures that made
+	// the index incomplete.
+	Errors []string
+
 	*sync.Mutex
 }
 
