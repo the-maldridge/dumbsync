@@ -98,8 +98,8 @@ func run() int {
 	// subset now, which is worth one line in the log of a scheduled run.
 	if len(indexRules) > 0 {
 		fmt.Printf("Publishing a subset of %s: %v\n", flag.Arg(0), indexRules)
-		fmt.Println("The manifest says it is one, so a client syncing with -delete keeps")
-		fmt.Println("whatever it leaves out until that client passes -allow-subset")
+		fmt.Println("A client given -delete will keep anything this manifest omits, and the")
+		fmt.Println("run that does so stops with exit 2 until it also passes -allow-subset")
 	}
 
 	// A manifest for a tree that could not be read completely is still
