@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	"github.com/cespare/xxhash/v2"
+
+	"github.com/the-maldridge/dumbsync/pkg/scope"
 )
 
 // workers bounds how many files are hashed at the same time.  Hashing
@@ -22,10 +24,10 @@ const workers = 16
 // the list has to stay small enough to be worth transferring.
 const maxProblems = 32
 
-// walk hashes every file below fsys into an index, skipping the keys in
-// exclude.  The index records its algorithm so the far end can hash the
-// way this end did.
-func walk(fsys fs.FS, hashType HashType, exclude map[string]bool) (*Index, error) {
+// walk hashes every file below fsys into an index, leaving out whatever
+// the rules put out of scope.  The index records its algorithm so the
+// far end can hash the way this end did.
+func walk(fsys fs.FS, hashType HashType, rules scope.Rules) (*Index, error) {
 	idx := &Index{
 		Files:    make(map[string][]byte),
 		HashType: hashType,
@@ -33,10 +35,10 @@ func walk(fsys fs.FS, hashType HashType, exclude map[string]bool) (*Index, error
 	}
 
 	w := &walker{
-		idx:     idx,
-		fs:      fsys,
-		exclude: exclude,
-		slots:   make(chan struct{}, workers),
+		idx:   idx,
+		fs:    fsys,
+		rules: rules,
+		slots: make(chan struct{}, workers),
 	}
 
 	err := fs.WalkDir(fsys, ".", w.visit)
@@ -53,28 +55,39 @@ func walk(fsys fs.FS, hashType HashType, exclude map[string]bool) (*Index, error
 
 // walker hashes the files found by a directory walk.
 type walker struct {
-	idx     *Index
-	fs      fs.FS
-	exclude map[string]bool
-	wg      sync.WaitGroup
-	slots   chan struct{}
+	idx   *Index
+	fs    fs.FS
+	rules scope.Rules
+	wg    sync.WaitGroup
+	slots chan struct{}
 }
 
 func (w *walker) visit(name string, d fs.DirEntry, err error) error {
 	if err != nil {
+		// A directory nobody is allowed to look inside is not a read
+		// failure worth calling the whole tree unreadable.  Nothing will
+		// be copied out of it, and nothing will be removed from it.
+		if !w.inScope(name) {
+			return nil
+		}
+
 		log.Println(err)
 		w.problem(name, err)
 		return nil
 	}
 
 	if d.IsDir() {
-		if w.excluded(name) {
+		// Descending is asked for rather than assumed because a rule
+		// later in the list can still bring something back from under a
+		// directory the earlier rules excluded.
+		if name != "." && !w.rules.Descend(name) {
 			return fs.SkipDir
 		}
+
 		return nil
 	}
 
-	if w.excluded(name) {
+	if !w.inScope(name) {
 		return nil
 	}
 
@@ -92,14 +105,11 @@ func (w *walker) visit(name string, d fs.DirEntry, err error) error {
 	return nil
 }
 
-func (w *walker) excluded(name string) bool {
-	if len(w.exclude) == 0 {
-		return false
-	}
-
-	// The root of the walk is never excluded, otherwise the whole tree
-	// would disappear along with the name used to describe it.
-	return name != "." && w.exclude[name]
+// inScope reports whether a name found by the walk belongs in the
+// index.  The root always does, otherwise the whole tree would
+// disappear along with the name used to describe it.
+func (w *walker) inScope(name string) bool {
+	return name == "." || w.rules.Keep(name)
 }
 
 func (w *walker) hashFile(name string) {

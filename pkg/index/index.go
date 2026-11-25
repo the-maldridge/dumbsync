@@ -2,10 +2,12 @@ package index
 
 import (
 	"bytes"
-	"fmt"
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
+
+	"github.com/the-maldridge/dumbsync/pkg/scope"
 )
 
 // Options describes how a tree is hashed into an index.
@@ -16,10 +18,11 @@ type Options struct {
 	// the same value twice.
 	Hash HashType
 
-	// Exclude lists keys that are never indexed.  A name is dropped
-	// when it matches a file, and a matching directory drops the whole
-	// subtree below it.  Names are keys, not operating system paths.
-	Exclude []string
+	// Rules decides which keys the index is allowed to describe.  What
+	// a rule drops is absent from the result on both ends of a sync, so
+	// it is neither copied, nor compared, nor removed.  An empty set of
+	// rules describes the whole tree.
+	Rules scope.Rules
 }
 
 // IndexFS hashes every file below fsys and returns an Index describing
@@ -27,12 +30,7 @@ type Options struct {
 // slashes, which is what makes an index from one machine comparable to
 // an index from another.
 func IndexFS(fsys fs.FS, o Options) (*Index, error) {
-	exclude, err := keySet(o.Exclude)
-	if err != nil {
-		return nil, err
-	}
-
-	return walk(fsys, o.Hash, exclude)
+	return walk(fsys, o.Hash, o.Rules)
 }
 
 // Provider is a file system that already knows the hashes of the files
@@ -52,16 +50,27 @@ type Provider interface {
 func IndexOf(fsys fs.FS, o Options) (*Index, error) {
 	if p, ok := fsys.(Provider); ok {
 		idx := p.Index()
-
-		exclude, err := keySet(o.Exclude)
-		if err != nil {
-			return nil, err
-		}
-		for name := range exclude {
-			delete(idx.Files, name)
+		if len(o.Rules) == 0 {
+			return idx, nil
 		}
 
-		return idx, nil
+		// The published index belongs to the file system that produced
+		// it, so narrowing it to a scope produces a new index rather
+		// than removing keys from the one still being served.
+		scoped := &Index{
+			Files:      make(map[string][]byte, len(idx.Files)),
+			HashType:   idx.HashType,
+			Incomplete: idx.Incomplete,
+			Errors:     idx.Errors,
+			Mutex:      new(sync.Mutex),
+		}
+		for name, sum := range idx.Files {
+			if o.Rules.Keep(name) {
+				scoped.Files[name] = sum
+			}
+		}
+
+		return scoped, nil
 	}
 
 	return IndexFS(fsys, o)
@@ -118,21 +127,4 @@ func (i *Index) Difference(target *Index) ([]string, []string, []string) {
 	}
 
 	return added, removed, changed
-}
-
-// keySet validates names that must be keys and returns them for lookup.
-func keySet(names []string) (map[string]bool, error) {
-	if len(names) == 0 {
-		return nil, nil
-	}
-
-	set := make(map[string]bool, len(names))
-	for _, name := range names {
-		if !fs.ValidPath(name) {
-			return nil, fmt.Errorf("%q is not a key relative to the tree", name)
-		}
-		set[name] = true
-	}
-
-	return set, nil
 }

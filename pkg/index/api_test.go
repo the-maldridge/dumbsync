@@ -3,8 +3,15 @@ package index
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io/fs"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/the-maldridge/dumbsync/pkg/scope"
 )
 
 func TestIndexFSUsesTheRequestedAlgorithm(t *testing.T) {
@@ -14,7 +21,7 @@ func TestIndexFSUsesTheRequestedAlgorithm(t *testing.T) {
 		"skipme.json":    &fstest.MapFile{Data: []byte("manifest")},
 	}
 
-	idx, err := IndexFS(files, Options{Hash: XXHash, Exclude: []string{"skipme.json"}})
+	idx, err := IndexFS(files, Options{Hash: XXHash, Rules: scope.Rules{scope.MustParse("skipme.json", false)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +47,7 @@ func TestIndexFSExcludesWholeSubtrees(t *testing.T) {
 		"vcs/deep/b": &fstest.MapFile{Data: []byte("b")},
 	}
 
-	idx, err := IndexFS(files, Options{Exclude: []string{"vcs"}})
+	idx, err := IndexFS(files, Options{Rules: scope.Rules{scope.MustParse("vcs", false)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,16 +57,125 @@ func TestIndexFSExcludesWholeSubtrees(t *testing.T) {
 	}
 }
 
+func TestIndexFSBringsBackWhatALaterRuleNames(t *testing.T) {
+	files := fstest.MapFS{
+		"foo/a.txt":      &fstest.MapFile{Data: []byte("a")},
+		"foo/deep/b.txt": &fstest.MapFile{Data: []byte("b")},
+		"bar/c.txt":      &fstest.MapFile{Data: []byte("c")},
+		"other/d.txt":    &fstest.MapFile{Data: []byte("d")},
+		"foo.txt":        &fstest.MapFile{Data: []byte("not the directory")},
+	}
+
+	idx, err := IndexFS(files, Options{Rules: scope.Rules{
+		scope.MustParse("*", false),
+		scope.MustParse("foo/", true),
+		scope.MustParse("bar/", true),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"bar/c.txt", "foo/a.txt", "foo/deep/b.txt"}
+	if got := sortedKeys(idx); !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+}
+
+// A directory nobody asked for is allowed to be unreadable: nothing is
+// copied out of it and nothing is removed from it, so a permission error
+// there is not a reason to call the whole tree untrustworthy.
+func TestUnreadableDirectoryOutsideScopeStaysComplete(t *testing.T) {
+	files := unreadableFS{
+		MapFS: fstest.MapFS{
+			"keep/a.txt":        &fstest.MapFile{Data: []byte("a")},
+			"secret/b.txt":      &fstest.MapFile{Data: []byte("b")},
+			"secret/deep/c.txt": &fstest.MapFile{Data: []byte("c")},
+			"other/d.txt":       &fstest.MapFile{Data: []byte("d")},
+		},
+
+		denied: "secret",
+	}
+
+	idx, err := IndexFS(files, Options{Rules: scope.Rules{
+		scope.MustParse("**", false),
+		scope.MustParse("keep/", true),
+		scope.MustParse("other/", true),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"keep/a.txt", "other/d.txt"}
+	if got := sortedKeys(idx); !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+	if idx.Incomplete {
+		t.Errorf("a subtree outside the scope made the index incomplete: %v", idx.Errors)
+	}
+}
+
+// A rule that can only name something deeper than the directories the
+// walk would skip has to keep the walk going, and a wide tree is where
+// skipping one branch too many would go unnoticed.
+func TestPruningNeverLosesWhatIsInScope(t *testing.T) {
+	files := make(fstest.MapFS, 200)
+	for dir := range 20 {
+		for file := range 10 {
+			files[fmt.Sprintf("dir%02d/file%d", dir, file)] = &fstest.MapFile{Data: []byte("body")}
+		}
+	}
+
+	idx, err := IndexFS(files, Options{Rules: scope.Rules{
+		scope.MustParse("**", false),
+		scope.MustParse("dir03/", true),
+		scope.MustParse("dir17/", true),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var want []string
+	for _, dir := range []string{"dir03", "dir17"} {
+		for file := range 10 {
+			want = append(want, fmt.Sprintf("%s/file%d", dir, file))
+		}
+	}
+	slices.Sort(want)
+
+	if got := sortedKeys(idx); !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %d keys from the two directories named", got, len(want))
+	}
+}
+
+// unreadableFS cannot read one directory or anything below it, standing
+// in for a subtree the operator has no business reading.
+type unreadableFS struct {
+	fstest.MapFS
+
+	denied string
+}
+
+func (u unreadableFS) Open(name string) (fs.File, error) {
+	if name == u.denied || strings.HasPrefix(name, u.denied+"/") {
+		return nil, fs.ErrPermission
+	}
+
+	return u.MapFS.Open(name)
+}
+
 func TestIndexOfUsesPublishedHashesWithoutReading(t *testing.T) {
 	want := &Index{
-		Files:    map[string][]byte{"a.txt": []byte("published")},
+		Files: map[string][]byte{
+			"a.txt":     []byte("published"),
+			"drop.json": []byte("also published"),
+		},
 		HashType: XXHash,
 	}
 
 	got, err := IndexOf(publishedFS{MapFS: fstest.MapFS{
 		"a.txt":     &fstest.MapFile{Data: []byte("different on disk")},
 		"drop.json": &fstest.MapFile{Data: []byte("x")},
-	}, idx: want}, Options{Hash: MD5, Exclude: []string{"drop.json"}})
+	}, idx: want}, Options{Hash: MD5, Rules: scope.Rules{scope.MustParse("drop.json", false)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +190,12 @@ func TestIndexOfUsesPublishedHashesWithoutReading(t *testing.T) {
 	}
 	if _, ok := got.Files["drop.json"]; ok {
 		t.Error("excluded key survived a published index")
+	}
+
+	// Narrowing what one caller is allowed to see does not narrow the
+	// index for anyone else using the same file system.
+	if len(want.Files) != 2 {
+		t.Errorf("the published index itself was changed to %v", want.Files)
 	}
 }
 
@@ -123,13 +245,5 @@ func TestDifferenceIsStableAcrossTheWireFormat(t *testing.T) {
 	}
 	if len(changed) != 1 || changed[0] != "a.txt" {
 		t.Errorf("changed = %v, want [a.txt]", changed)
-	}
-}
-
-func TestExcludedNamesMustBeKeys(t *testing.T) {
-	for _, name := range []string{"/etc/passwd", "../escape", "a/", ""} {
-		if _, err := IndexFS(fstest.MapFS{}, Options{Exclude: []string{name}}); err == nil {
-			t.Errorf("Exclude %q accepted a name that cannot be a key", name)
-		}
 	}
 }
