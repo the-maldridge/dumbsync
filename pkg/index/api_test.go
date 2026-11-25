@@ -199,6 +199,62 @@ func TestIndexOfUsesPublishedHashesWithoutReading(t *testing.T) {
 	}
 }
 
+// What a publisher said about the completeness of its list has to survive
+// the trip, and a manifest written before the claim existed has to arrive
+// as a description of a whole tree so that nothing changes underneath a
+// client still running an old build.
+func TestSubsetClaimSurvivesTheWireFormat(t *testing.T) {
+	data, err := json.Marshal(&Index{
+		Files:  map[string][]byte{"a.txt": []byte("x")},
+		Subset: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded := new(Index)
+	if err := json.Unmarshal(data, decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Subset {
+		t.Errorf("%s decoded as a whole tree", data)
+	}
+
+	old := new(Index)
+	if err := json.Unmarshal([]byte(`{"Files":{"a.txt":"eJw="},"HashType":0,"Incomplete":false}`), old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Subset || old.Incomplete {
+		t.Errorf("a manifest predating both flags decoded as subset %v incomplete %v", old.Subset, old.Incomplete)
+	}
+}
+
+// Narrowing somebody else's list must not make the holes it left out
+// unmentioned.
+func TestNarrowingASubsetKeepsItASubset(t *testing.T) {
+	published := &Index{
+		Files:  map[string][]byte{"foo/a.txt": nil, "bar/b.txt": nil},
+		Subset: true,
+	}
+
+	got, err := IndexOf(publishedFS{MapFS: fstest.MapFS{}, idx: published}, Options{
+		Rules: scope.Rules{
+			scope.MustParse("*", false),
+			scope.MustParse("foo/", true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got.Files) != 1 {
+		t.Fatalf("files = %v, want only the one in scope", got.Files)
+	}
+	if !got.Subset {
+		t.Error("narrowing a subset manifest lost the claim that it is one")
+	}
+}
+
 // publishedFS stands in for a file system whose hashes come from
 // somewhere else, such as a manifest fetched over HTTP.
 type publishedFS struct {

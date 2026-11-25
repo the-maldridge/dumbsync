@@ -56,12 +56,16 @@ func IndexOf(fsys fs.FS, o Options) (*Index, error) {
 
 		// The published index belongs to the file system that produced
 		// it, so narrowing it to a scope produces a new index rather
-		// than removing keys from the one still being served.
+		// than removing keys from the one still being served.  What the
+		// publisher said about the list travels to the copy in full: a
+		// subset narrowed further is still a subset, and losing that
+		// would hand back a list whose holes are now unmentioned.
 		scoped := &Index{
 			Files:      make(map[string][]byte, len(idx.Files)),
 			HashType:   idx.HashType,
 			Incomplete: idx.Incomplete,
 			Errors:     idx.Errors,
+			Subset:     idx.Subset,
 			Mutex:      new(sync.Mutex),
 		}
 		for name, sum := range idx.Files {

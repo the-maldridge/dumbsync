@@ -23,6 +23,22 @@ type Index struct {
 	// the index incomplete.
 	Errors []string
 
+	// Subset is a claim made by whoever published the index: it leaves
+	// out part of the tree on purpose, and an entry missing from it is
+	// not evidence that the file is gone.  Copying from such an index
+	// is fine; removing anything on its authority is not, because the
+	// omissions look exactly like deletions from here.
+	//
+	// Like Incomplete, the flag is named in the negative so that a
+	// manifest written before it existed decodes as a description of a
+	// whole tree and nothing about old clients changes.  Narrowing an
+	// index that already claimed to be a subset keeps the claim.
+	// Filtering a reader does for its own purposes is not recorded
+	// here, because that reader narrows both ends together and can see
+	// the result of doing so: only a publisher can leave somebody else
+	// holding a list with holes in it.
+	Subset bool
+
 	*sync.Mutex
 }
 
