@@ -208,6 +208,17 @@ type publishedFS struct {
 
 func (p publishedFS) Index() *Index { return p.idx }
 
+func TestKeysListsWhatAnIndexDescribes(t *testing.T) {
+	idx := &Index{Files: map[string][]byte{"a.txt": nil, "sub/b.txt": nil}}
+
+	got := idx.Keys()
+	slices.Sort(got)
+
+	if want := []string{"a.txt", "sub/b.txt"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+}
+
 func TestDifferenceIsStableAcrossTheWireFormat(t *testing.T) {
 	src, err := IndexFS(fstest.MapFS{
 		"a.txt": &fstest.MapFile{Data: []byte("new contents")},

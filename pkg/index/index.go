@@ -89,6 +89,18 @@ func HashTypeFromEnv() HashType {
 	}
 }
 
+// Keys lists every key the index describes, in no particular order.
+// Checking a rule set against what a tree actually holds is the only
+// good reason to want them.
+func (i *Index) Keys() []string {
+	keys := make([]string, 0, len(i.Files))
+	for key := range i.Files {
+		keys = append(keys, key)
+	}
+
+	return keys
+}
+
 // Difference compares two indexes of the same algorithm and returns the
 // keys the target has that the receiver does not, the keys the receiver
 // has that the target does not, and the keys both have with different

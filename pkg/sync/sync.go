@@ -144,7 +144,7 @@ func Sync(o Options) (Report, error) {
 	// Asked before the destination is hashed, because a rule naming
 	// nothing is answered by the source alone and a mistyped name is not
 	// worth reading a whole tree for.
-	if missing := o.Rules.Uncovered(keysOf(src.Files)); len(missing) > 0 {
+	if missing := o.Rules.Uncovered(src.Keys()); len(missing) > 0 {
 		names := make([]string, 0, len(missing))
 		for _, rule := range missing {
 			names = append(names, rule.String())
@@ -190,17 +190,6 @@ func Sync(o Options) (Report, error) {
 	}
 
 	return r.report, nil
-}
-
-// keysOf lists what an index describes, which is what the include rules
-// are checked against.
-func keysOf(files map[string][]byte) []string {
-	keys := make([]string, 0, len(files))
-	for key := range files {
-		keys = append(keys, key)
-	}
-
-	return keys
 }
 
 type run struct {
