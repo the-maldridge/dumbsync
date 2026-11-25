@@ -41,9 +41,10 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "You must specify a path to index!")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "-exclude and -include choose which files the manifest describes. Both")
-		fmt.Fprintln(os.Stderr, "may be repeated, and the last rule matching a name decides. A client")
-		fmt.Fprintln(os.Stderr, "syncing from this manifest will believe it describes the whole tree,")
-		fmt.Fprintln(os.Stderr, "and will remove anything it is told to delete that the manifest omits.")
+		fmt.Fprintln(os.Stderr, "may be repeated, and the last rule matching a name decides. A manifest")
+		fmt.Fprintln(os.Stderr, "built with them says that it is a subset, so a client syncing from it")
+		fmt.Fprintln(os.Stderr, "with -delete keeps whatever it leaves out unless that client also passes")
+		fmt.Fprintln(os.Stderr, "-allow-subset.")
 		return 2
 	}
 
@@ -75,6 +76,12 @@ func run() int {
 		return 1
 	}
 
+	// Only rules somebody typed make a publication partial. The rules put
+	// on the list above are in every manifest there has ever been, so
+	// counting them would call every publish a subset and take deletions
+	// away everywhere at once.
+	idx.Subset = len(indexRules) > 0
+
 	// The same mistake is refused here as at the far end: a pattern that
 	// named nothing would publish a manifest describing almost nothing,
 	// and a client told to delete would bring the destination down to
@@ -91,6 +98,8 @@ func run() int {
 	// subset now, which is worth one line in the log of a scheduled run.
 	if len(indexRules) > 0 {
 		fmt.Printf("Publishing a subset of %s: %v\n", flag.Arg(0), indexRules)
+		fmt.Println("The manifest says it is one, so a client syncing with -delete keeps")
+		fmt.Println("whatever it leaves out until that client passes -allow-subset")
 	}
 
 	// A manifest for a tree that could not be read completely is still

@@ -48,6 +48,7 @@ var (
 	syncExec         = flag.String("exec", "", "Execute a command when files are changed")
 	syncDelayChanges = flag.Bool("delay-changes", false, "Atomically update files after downloads")
 	syncDelete       = flag.Bool("delete", false, "Remove files the source no longer has")
+	syncAllowSubset  = flag.Bool("allow-subset", false, "Allow -delete to remove files a manifest that says it is partial leaves out")
 
 	// syncRules is a single ordered list that both flags append to, so
 	// the order the arguments were typed in survives to the decision.
@@ -91,6 +92,11 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "nothing else:")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  dumbsync -exclude '*' -include foo/ -include bar/ https://host/ /srv/www")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "A manifest built from a subset says that it is one. Such a manifest is")
+		fmt.Fprintln(os.Stderr, "still copied from in full, but -delete will not remove anything it omits")
+		fmt.Fprintln(os.Stderr, "until -allow-subset is given as well, since an omission and a deletion")
+		fmt.Fprintln(os.Stderr, "look the same from here.")
 		return 2
 	}
 
@@ -119,13 +125,14 @@ func run() int {
 	}
 
 	report, syncErr := dsync.Sync(dsync.Options{
-		Source:  source,
-		Target:  dest,
-		Hash:    index.HashTypeFromEnv(),
-		Rules:   rules,
-		Threads: *syncThreads,
-		Atomic:  *syncDelayChanges,
-		Delete:  *syncDelete,
+		Source:      source,
+		Target:      dest,
+		Hash:        index.HashTypeFromEnv(),
+		Rules:       rules,
+		Threads:     *syncThreads,
+		Atomic:      *syncDelayChanges,
+		Delete:      *syncDelete,
+		AllowSubset: *syncAllowSubset,
 		Progress: func(e dsync.Event) {
 			fmt.Printf("%s %s\n", action[e.Kind], e.Key)
 		},
@@ -141,10 +148,13 @@ func run() int {
 	}
 
 	if len(report.Leftover) > 0 {
-		if *syncDelete {
-			fmt.Printf("Kept %d file(s) the source no longer has, because it could not be read completely\n", len(report.Leftover))
-		} else {
+		switch {
+		case !*syncDelete:
 			fmt.Printf("Kept %d file(s) the source no longer has, pass -delete to remove them\n", len(report.Leftover))
+		case report.Subset && !errors.Is(syncErr, dsync.ErrIncomplete):
+			fmt.Printf("Kept %d file(s) that a source describing only part of its tree does not mention, pass -allow-subset to remove them\n", len(report.Leftover))
+		default:
+			fmt.Printf("Kept %d file(s) the source no longer has, because it could not be read completely\n", len(report.Leftover))
 		}
 	}
 
@@ -154,6 +164,16 @@ func run() int {
 			// which is a complaint about how the command was written and
 			// not a transfer that went wrong.
 			fmt.Fprintln(os.Stderr, syncErr)
+			return 2
+		}
+
+		if errors.Is(syncErr, dsync.ErrSubset) {
+			// Nothing failed on the way here, and the copies that were
+			// asked for were made. What is missing is a second word from
+			// whoever typed the command line, which makes this the same
+			// kind of problem as a rule that names nothing.
+			fmt.Fprintf(os.Stderr, "Not deleting: %s\n", syncErr)
+			fmt.Fprintln(os.Stderr, "Add -allow-subset if this manifest is expected to cover everything worth keeping")
 			return 2
 		}
 
