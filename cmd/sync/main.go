@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"sort"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 
 	"github.com/the-maldridge/dumbsync/pkg/httpfs"
 	"github.com/the-maldridge/dumbsync/pkg/index"
+	"github.com/the-maldridge/dumbsync/pkg/scope"
 	dsync "github.com/the-maldridge/dumbsync/pkg/sync"
 	"github.com/the-maldridge/dumbsync/pkg/tree"
 )
@@ -46,7 +48,16 @@ var (
 	syncExec         = flag.String("exec", "", "Execute a command when files are changed")
 	syncDelayChanges = flag.Bool("delay-changes", false, "Atomically update files after downloads")
 	syncDelete       = flag.Bool("delete", false, "Remove files the source no longer has")
+
+	// syncRules is a single ordered list that both flags append to, so
+	// the order the arguments were typed in survives to the decision.
+	syncRules scope.Rules
 )
+
+func init() {
+	flag.Var(&scope.RuleFlag{Rules: &syncRules, Include: false}, "exclude", "Leave out everything matching a pattern")
+	flag.Var(&scope.RuleFlag{Rules: &syncRules, Include: true}, "include", "Put back everything matching a pattern, over any earlier -exclude")
+}
 
 // usageError reports a command invoked in a way that cannot be acted
 // on, as opposed to a source that could not be reached or a file that
@@ -72,6 +83,14 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "The source is a URL published by dumbsync-index, or a directory on")
 		fmt.Fprintln(os.Stderr, "this machine given as a path or a file:// URL.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "-exclude and -include choose which files are synchronized. Both may be")
+		fmt.Fprintln(os.Stderr, "repeated, and the last rule matching a name decides. * covers one path")
+		fmt.Fprintln(os.Stderr, "segment, ** crosses segments, ? is a single character, and naming a")
+		fmt.Fprintln(os.Stderr, "directory names everything under it. To take two directories and")
+		fmt.Fprintln(os.Stderr, "nothing else:")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  dumbsync -exclude '*' -include foo/ -include bar/ https://host/ /srv/www")
 		return 2
 	}
 
@@ -92,11 +111,18 @@ func run() int {
 		return fail(err)
 	}
 
+	// The names this command owns for itself are put out of scope last,
+	// where no rule typed earlier can bring them back into the sync.
+	rules, err := pinned(syncRules, append(owned, *syncFileName)...)
+	if err != nil {
+		return fail(err)
+	}
+
 	report, syncErr := dsync.Sync(dsync.Options{
 		Source:  source,
 		Target:  dest,
 		Hash:    index.HashTypeFromEnv(),
-		Exclude: append(owned, *syncFileName),
+		Rules:   rules,
 		Threads: *syncThreads,
 		Atomic:  *syncDelayChanges,
 		Delete:  *syncDelete,
@@ -123,6 +149,14 @@ func run() int {
 	}
 
 	if syncErr != nil {
+		if errors.Is(syncErr, dsync.ErrUncovered) {
+			// The rules asked for something the source does not have,
+			// which is a complaint about how the command was written and
+			// not a transfer that went wrong.
+			fmt.Fprintln(os.Stderr, syncErr)
+			return 2
+		}
+
 		if errors.Is(syncErr, dsync.ErrIncomplete) {
 			// Anything the source could not be read is a file whose
 			// absence means nothing, so say so loudly rather than
@@ -165,6 +199,25 @@ func fail(err error) int {
 	}
 
 	return 1
+}
+
+// pinned adds the names a command owns for itself to the end of the rule
+// list, where nothing typed earlier can put them back in scope. Each one
+// is quoted, being a file rather than something anybody meant as a
+// pattern.
+func pinned(rules scope.Rules, names ...string) (scope.Rules, error) {
+	out := slices.Clone(rules)
+
+	for _, name := range names {
+		rule, err := scope.Parse(scope.Quote(name), false)
+		if err != nil {
+			return nil, usagef("%s cannot be kept out of the sync: %s", name, err)
+		}
+
+		out = append(out, rule)
+	}
+
+	return out, nil
 }
 
 // claim notes the files the destination owns for itself, which are
