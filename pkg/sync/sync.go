@@ -43,12 +43,18 @@ var ErrCorrupt = errors.New("copied content does not match the source")
 // the destination is touched.
 var ErrUncovered = errors.New("an include rule names nothing in the source")
 
-// ErrSubset is returned when a sync asked to delete is described by a
-// source that says it covers only part of its tree.  Whatever was
-// copied is kept, but a file the publisher left out of its list is not
-// evidence that the file is gone, so removing one needs a caller that
-// has read the list and means it, not a rule set that happens to be
-// narrow.  Files that would have been deleted are reported as leftover.
+// ErrSubset is returned when a sync asked to delete was stopped from
+// deleting by a source that says it covers only part of its tree.  A
+// file the publisher left out of its list is not evidence that the file
+// is gone, so removing one needs a caller that has read the list and
+// means it, not a rule set that happens to be narrow.
+//
+// Only a refusal that kept a file is reported this way.  Being partial
+// is a standing property of a publication and not a fault, so a run
+// that had nothing to remove says nothing and succeeds, the same as it
+// did before the claim existed: a scheduled sync must not start
+// complaining on every tick because the source excludes something.
+// Files that would have been deleted are reported as leftover.
 var ErrSubset = errors.New("the source describes only part of its tree")
 
 // Options describes a single sync.
@@ -215,7 +221,9 @@ func Sync(o Options) (Report, error) {
 		return r.report, fmt.Errorf("%w: %v", ErrIncomplete, src.Errors)
 	}
 
-	if src.Subset && o.Delete && !o.AllowSubset {
+	// A partial source with nothing outside its list costs the run
+	// nothing, so it costs the caller nothing either.
+	if src.Subset && o.Delete && !o.AllowSubset && len(removed) > 0 {
 		return r.report, fmt.Errorf("%w: %d file(s) kept, deleting against a partial list needs an explicit acknowledgement", ErrSubset, len(removed))
 	}
 

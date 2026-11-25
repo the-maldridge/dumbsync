@@ -194,6 +194,38 @@ func TestAPartialSourceCannotDelete(t *testing.T) {
 	check(t, dst, "unmentioned.txt", "still there")
 }
 
+// Being partial is a standing property of a publication, not a fault in
+// this run, so a run with nothing outside the list to remove has to end
+// the way it did before the claim existed. Otherwise every tick of a
+// scheduled sync against a source that excludes anything at all would
+// report itself broken forever.
+func TestAPartialSourceWithNothingToKeepIsQuiet(t *testing.T) {
+	dst := t.TempDir()
+	seed(t, dst, map[string]string{"keep.txt": "stay"})
+
+	src := fstest.MapFS{"keep.txt": &fstest.MapFile{Data: []byte("stay")}}
+	idx, err := index.IndexFS(src, index.Options{Hash: index.XXHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.Subset = true
+
+	rep, err := syncTo(t, publisher{FS: src, idx: idx}, dst, func(o *dsync.Options) {
+		o.Delete = true
+	})
+	if err != nil {
+		t.Fatalf("a steady state run against a partial source failed: %v", err)
+	}
+
+	if len(rep.Added) != 0 || len(rep.Changed) != 0 || len(rep.Removed) != 0 || len(rep.Leftover) != 0 {
+		t.Errorf("a steady state run reported added %v changed %v removed %v leftover %v", rep.Added, rep.Changed, rep.Removed, rep.Leftover)
+	}
+	if !rep.Subset {
+		t.Error("the report does not say the source described part of a tree")
+	}
+	check(t, dst, "keep.txt", "stay")
+}
+
 // The refusal is about a caller that has not looked at what the list
 // covers, so a caller that says it means it gets its removals.
 func TestAllowSubsetLiftsThePartialSourceRefusal(t *testing.T) {
