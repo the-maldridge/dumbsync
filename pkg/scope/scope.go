@@ -164,8 +164,6 @@ func Parse(pattern string, include bool) (Rule, error) {
 	return Rule{Pattern: pattern, Include: include, re: re, literal: literal}, nil
 }
 
-// MustParse compiles a pattern and panics when it is not usable, which
-// suits patterns written in source rather than typed by a person.
 // Quote escapes the characters a pattern would otherwise read as wildcards, so
 // that a rule covers exactly the name given and everything below it. Names a
 // program keeps for itself, such as the file it records its own state in, are
@@ -185,7 +183,7 @@ func Quote(name string) string {
 }
 
 // MustParse compiles a pattern and panics when it is not usable, which
-
+// suits patterns written in source rather than typed by a person.
 func MustParse(pattern string, include bool) Rule {
 	r, err := Parse(pattern, include)
 	if err != nil {
