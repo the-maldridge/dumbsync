@@ -197,6 +197,25 @@ func TestUncoveredIncludesAreNamed(t *testing.T) {
 	}
 }
 
+// A name a program owns for itself has to be matched exactly, whatever
+// characters it happens to be spelled with.
+func TestQuoteCoversOnlyTheNameItQuotes(t *testing.T) {
+	rule, err := Parse(Quote(`odd*na?me\value`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !rule.Match(`odd*na?me\value`) || !rule.Match(`odd*na?me\value/below`) {
+		t.Errorf("quoted name does not cover itself and its contents: regexp %s", rule.re)
+	}
+
+	for _, other := range []string{"oddXna?me\\value", `odd*naXme\value`, `odd*na?me`, "odd"} {
+		if rule.Match(other) {
+			t.Errorf("quoted name covers %q: regexp %s", other, rule.re)
+		}
+	}
+}
+
 func TestParseAcceptsPathsAndRejectsNonsense(t *testing.T) {
 	for _, pattern := range []string{"foo", "foo/", "./foo", "**", "*", "a/b", `a\*b`, "a b", "foo.bar"} {
 		if _, err := Parse(pattern, true); err != nil {

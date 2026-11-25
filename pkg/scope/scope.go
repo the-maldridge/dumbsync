@@ -166,6 +166,26 @@ func Parse(pattern string, include bool) (Rule, error) {
 
 // MustParse compiles a pattern and panics when it is not usable, which
 // suits patterns written in source rather than typed by a person.
+// Quote escapes the characters a pattern would otherwise read as wildcards, so
+// that a rule covers exactly the name given and everything below it. Names a
+// program keeps for itself, such as the file it records its own state in, are
+// quoted: a star in such a name should reach that one file and not the tree.
+func Quote(name string) string {
+	var out strings.Builder
+
+	for i := 0; i < len(name); i++ {
+		if name[i] == '*' || name[i] == '?' || name[i] == '\\' {
+			out.WriteByte('\\')
+		}
+
+		out.WriteByte(name[i])
+	}
+
+	return out.String()
+}
+
+// MustParse compiles a pattern and panics when it is not usable, which
+
 func MustParse(pattern string, include bool) Rule {
 	r, err := Parse(pattern, include)
 	if err != nil {
