@@ -16,9 +16,11 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"
+	"github.com/the-maldridge/dumbsync/pkg/scope"
 	"github.com/the-maldridge/dumbsync/pkg/tree"
 )
 
@@ -31,6 +33,15 @@ var ErrIncomplete = errors.New("source could not be read completely")
 // ErrCorrupt is reported for a file whose content did not match the hash
 // the source published for it.
 var ErrCorrupt = errors.New("copied content does not match the source")
+
+// ErrUncovered is returned when an include rule matches no file in the
+// source.  Everything else is usually excluded when includes are used at
+// all, so such a run would change nothing and report a clean success,
+// which looks exactly like a healthy run that had nothing to do.  A name
+// covering nothing is a mistake in the rules far more often than it is
+// an empty directory someone meant to sync, so it stops the run before
+// the destination is touched.
+var ErrUncovered = errors.New("an include rule names nothing in the source")
 
 // Options describes a single sync.
 type Options struct {
@@ -45,9 +56,10 @@ type Options struct {
 	// two ends cannot disagree by configuration alone.
 	Hash index.HashType
 
-	// Exclude lists keys left alone on both sides, for example a manifest
-	// kept alongside the files or a marker owned by the destination.
-	Exclude []string
+	// Rules decides which keys the sync is allowed to see on either side.
+	// Rules a caller keeps for its own safety go last, since the last
+	// rule covering a key is the one that decides.
+	Rules scope.Rules
 
 	// Threads is how many files are copied at once. Values below one use
 	// the default of ten.
@@ -124,15 +136,27 @@ func Sync(o Options) (Report, error) {
 		threads = 10
 	}
 
-	src, err := index.IndexOf(o.Source, index.Options{Hash: o.Hash, Exclude: o.Exclude})
+	src, err := index.IndexOf(o.Source, index.Options{Hash: o.Hash, Rules: o.Rules})
 	if err != nil {
 		return Report{}, err
+	}
+
+	// Asked before the destination is hashed, because a rule naming
+	// nothing is answered by the source alone and a mistyped name is not
+	// worth reading a whole tree for.
+	if missing := o.Rules.Uncovered(keysOf(src.Files)); len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for _, rule := range missing {
+			names = append(names, rule.String())
+		}
+
+		return Report{}, fmt.Errorf("%w: %s", ErrUncovered, strings.Join(names, ", "))
 	}
 
 	// The destination has to be hashed the way the source was, so the
 	// algorithm travels from one end to the other instead of being
 	// configured twice.
-	dst, err := index.IndexFS(o.Target.FS(), index.Options{Hash: src.HashType, Exclude: o.Exclude})
+	dst, err := index.IndexFS(o.Target.FS(), index.Options{Hash: src.HashType, Rules: o.Rules})
 	if err != nil {
 		return Report{}, err
 	}
@@ -166,6 +190,17 @@ func Sync(o Options) (Report, error) {
 	}
 
 	return r.report, nil
+}
+
+// keysOf lists what an index describes, which is what the include rules
+// are checked against.
+func keysOf(files map[string][]byte) []string {
+	keys := make([]string, 0, len(files))
+	for key := range files {
+		keys = append(keys, key)
+	}
+
+	return keys
 }
 
 type run struct {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/the-maldridge/dumbsync/pkg/index"
+	"github.com/the-maldridge/dumbsync/pkg/scope"
 	dsync "github.com/the-maldridge/dumbsync/pkg/sync"
 	"github.com/the-maldridge/dumbsync/pkg/tree"
 )
@@ -322,7 +323,7 @@ func TestProgressCoversEveryAction(t *testing.T) {
 	}
 }
 
-func TestExcludeKeepsFilesOffBothSides(t *testing.T) {
+func TestRulesKeepFilesOffBothSides(t *testing.T) {
 	dst := t.TempDir()
 	seed(t, dst, map[string]string{"marker": "mine"})
 
@@ -333,7 +334,7 @@ func TestExcludeKeepsFilesOffBothSides(t *testing.T) {
 
 	rep, err := syncTo(t, src, dst, func(o *dsync.Options) {
 		o.Delete = true
-		o.Exclude = []string{"marker"}
+		o.Rules = scope.Rules{scope.MustParse("marker", false)}
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -346,6 +347,76 @@ func TestExcludeKeepsFilesOffBothSides(t *testing.T) {
 		t.Errorf("excluded key was acted on: leftover %v removed %v", rep.Leftover, rep.Removed)
 	}
 	check(t, dst, "marker", "mine")
+}
+
+// What the rules leave out is missing from both indexes, so it is not
+// copied across, not compared, and above all not removed from the
+// destination even when deletions were asked for.
+func TestOnlyWhatTheRulesNameIsTouched(t *testing.T) {
+	dst := t.TempDir()
+	seed(t, dst, map[string]string{
+		"foo/stale.txt":  "gone from the source",
+		"other/keep.txt": "never in scope",
+	})
+
+	src := fstest.MapFS{
+		"foo/a.txt":      &fstest.MapFile{Data: []byte("a")},
+		"foo/deep/b.txt": &fstest.MapFile{Data: []byte("b")},
+		"bar/c.txt":      &fstest.MapFile{Data: []byte("c")},
+		"other/d.txt":    &fstest.MapFile{Data: []byte("d")},
+	}
+
+	rep, err := syncTo(t, src, dst, func(o *dsync.Options) {
+		o.Delete = true
+		o.Rules = scope.Rules{
+			scope.MustParse("*", false),
+			scope.MustParse("foo/", true),
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"foo/a.txt", "foo/deep/b.txt"}; !equal(rep.Added, want) {
+		t.Errorf("added = %v, want %v", rep.Added, want)
+	}
+	if want := []string{"foo/stale.txt"}; !equal(rep.Removed, want) {
+		t.Errorf("removed = %v, want only the file inside scope the source no longer has", rep.Removed)
+	}
+	if len(rep.Leftover) != 0 {
+		t.Errorf("leftover = %v, want nothing outside scope listed as a deletion", rep.Leftover)
+	}
+
+	check(t, dst, "other/keep.txt", "never in scope")
+	if _, err := fs.Stat(osDirFS(dst), "other/d.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a file outside the scope was copied: stat = %v", err)
+	}
+}
+
+// An include naming nothing the source has is a mistyped name far more
+// often than a deliberate no-op, and with everything else excluded the
+// run would otherwise report a clean success having done nothing.
+func TestARuleNamingNothingStopsBeforeAnythingIsWritten(t *testing.T) {
+	dst := t.TempDir()
+	seed(t, dst, map[string]string{"keep.txt": "untouched"})
+
+	rep, err := syncTo(t, fstest.MapFS{
+		"foo/a.txt": &fstest.MapFile{Data: []byte("a")},
+	}, dst, func(o *dsync.Options) {
+		o.Delete = true
+		o.Rules = scope.Rules{
+			scope.MustParse("*", false),
+			scope.MustParse("nope/", true),
+		}
+	})
+	if !errors.Is(err, dsync.ErrUncovered) {
+		t.Fatalf("err = %v, want %v", err, dsync.ErrUncovered)
+	}
+	if !rep.Empty() {
+		t.Errorf("report = %+v, want nothing done", rep)
+	}
+
+	check(t, dst, "keep.txt", "untouched")
 }
 
 // publisher stands in for a source that reports its own hashes, as a
