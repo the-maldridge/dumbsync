@@ -111,20 +111,27 @@ is simply not created at the destination.
 
 ### The two ends have to agree
 
-The rules are not written into the manifest and the manifest does not
-remember them.  Rules given to `dumbsync` narrow one destination and
-change nothing about what is published.  Rules given to `dumbsync-index`
-narrow the manifest itself, and every client then believes that subset is
-the whole tree:
+The rules are not written into the manifest.  Rules given to `dumbsync`
+narrow one destination and change nothing about what is published.  Rules
+given to `dumbsync-index` narrow the manifest itself, and a manifest
+narrowed that way says so in the file:
 
-> A manifest built with `-exclude '**'`, synced from by a client given
-> `-delete`, will remove from that destination everything the subset
-> omitted.  Both ends are behaving as designed, which is exactly why the
-> combination is worth reading twice before scheduling it.
+> A manifest built with `-exclude '**'` reaches a client marked as
+> describing part of a tree, and that client keeps everything the subset
+> omitted rather than removing it.  From behind HTTP, an entry the
+> publisher left out of scope and a file somebody deleted are the same
+> absent entry, so such a manifest is not taken to author removals on its
+> own.  `-allow-subset` is the word that says somebody read what the
+> manifest covers and means it.
 
-The indexer prints `Publishing a subset of <path>: [-exclude ** -include
-foo/]` whenever it is given any rules at all, so the narrowing is in the
-log of the run that did it.
+The indexer prints the narrowing and that consequence whenever it is
+given any rules at all, so both are in the log of the run that made them:
+
+```
+Publishing a subset of /srv/www: [-exclude ** -include foo/]
+The manifest says it is one, so a client syncing with -delete keeps
+whatever it leaves out until that client passes -allow-subset
+```
 
 ### A name that matches nothing is refused
 
@@ -204,6 +211,7 @@ of the tree it describes.
 | `-timeout` | `10s` | Per-request HTTP timeout, body included.  Raise it for large files. |
 | `-delay-changes` | off | Write every file beside its final name and move it into place once all transfers finish. |
 | `-delete` | off | Remove destination files the source no longer lists. |
+| `-allow-subset` | off | Let `-delete` also remove files that a source describing only part of its tree does not mention. |
 | `-exclude` | none | Leave out everything a pattern names.  Repeatable, order matters, see [Selecting what to sync](#selecting-what-to-sync). |
 | `-include` | none | Put back what an earlier `-exclude` left out.  Repeatable, order matters. |
 | `-exec` | none | Command to run when the run changed something. |
@@ -219,8 +227,10 @@ Exit status: `0` nothing needed doing, or everything that did landed;
 the source could not be read completely, or an `-exec` line that cannot
 be parsed; `2` the invocation is wrong (bad source, half a certificate
 pair, `-delete` on a directory dumbsync has not taken over, an
-`-include` that names nothing in the source); otherwise the exit status
-of the `-exec` command, or `255` if it could not be started.
+`-include` that names nothing in the source, `-delete` against a source
+that says it describes only part of its tree without `-allow-subset`);
+otherwise the exit status of the `-exec` command, or `255` if it could
+not be started.
 
 Output is one line per action, which scripts parse.  Keep to it if you
 are writing one.  Failures and warnings go to stderr, the rest to
@@ -237,11 +247,13 @@ Kept 3 file(s) the source no longer has, pass -delete to remove them
 
 ### Removing files
 
-Nothing at the destination is ever removed unless all three of these are
+Nothing at the destination is ever removed unless all four of these are
 true:
 
 - `-delete` was given,
-- the source's manifest says it was read completely, and
+- the source's manifest says it was read completely,
+- the manifest does not describe only part of its tree, or
+  `-allow-subset` was given as well, and
 - the destination holds a `.dumbsync-managed` file that dumbsync wrote.
 
 The marker is what stops `-delete` aimed at a mistyped path, or at a
@@ -252,11 +264,15 @@ says so; run once without `-delete` to write the marker and take the
 directory over.  To hand a directory back, delete `.dumbsync-managed`
 from it.
 
-Files kept rather than removed are reported as `Kept N file(s) …`, and
-the run still exits 0.  A manifest that admits to being incomplete
+Files kept rather than removed are reported as `Kept N file(s) …`, on a
+line naming the reason.  A manifest that admits to being incomplete
 suppresses removals on its own, even with `-delete`, because a file the
 server failed to read and a file that was deleted look identical from
-here.
+here, and the run exits 1 because the two trees may well not match at the
+end of it.  A manifest that says it describes only part of its tree is
+the same refusal with a different remedy: nothing went wrong, and what is
+missing is a second flag on the command line, so the run exits 2 and
+names `-allow-subset`.
 
 ### Atomic updates
 
@@ -334,7 +350,8 @@ one time you have to debug it by hand:
   "Files": {"greeting.txt": "sZRqySSS0jR8YjW00mERhA=="},
   "HashType": 0,
   "Incomplete": false,
-  "Errors": null
+  "Errors": null,
+  "Subset": false
 }
 ```
 
@@ -345,9 +362,14 @@ entry above is a file holding `hello` and a newline, so the digest is the
 base64 of `b1946ac92492d2347c6235b4d2611184` rather than the hex string
 most tools print.
 
-`Incomplete` and `Errors` were added later, and a manifest from an older
-build decodes as complete, which is the point of naming the flag in the
-negative.
+`Incomplete`, `Errors` and `Subset` were added later, and a manifest from
+an older build decodes as complete and as a description of a whole tree,
+which is the point of naming both flags in the negative.  `Subset` is a
+publisher saying its list leaves part of the tree out on purpose, so an
+entry missing from it proves nothing.  It is also the one field a client
+old enough not to know about it will simply ignore and then delete on,
+which means it protects a destination only once that end has been updated
+as well.
 
 ## You should probably be using something else!
 

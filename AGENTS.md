@@ -60,14 +60,15 @@ matched no source file → index the destination **with the source's algorithm a
 the same rule set** → `Difference` → copy adds and changes through one pool sized by
 `-threads`, hashing each file on the way in and refusing it when the digest is not
 what the source said → move staged files into place when `-delay-changes` →
-removals only if `-delete` and the source was read completely → `Report{Added,
-Changed, Removed, Leftover, Failed}`.
+removals only if `-delete`, the source was read completely, and the source is not a
+published subset unless `AllowSubset` → `Report{Added, Changed, Removed, Leftover,
+Failed, Subset}`.
 
 ## Manifest format
 
 `dumbsync.json` is `json.Marshal` of `Index` with **no struct tags**, so keys are
 Go field names: `{"Files": {...}, "HashType": 1, "Incomplete": true, "Errors":
-[...]}`.
+[...], "Subset": true}`.
 
 - `Files` keys are slash-separated paths **relative to the indexed root**
   (`sub/b.txt`), never absolute, never rooted with `./`.
@@ -79,6 +80,15 @@ Go field names: `{"Files": {...}, "HashType": 1, "Incomplete": true, "Errors":
   first releases, and the flag is deliberately inverted (`Incomplete`, not
   `Complete`) so a manifest written by an older build decodes as whole. Keep the
   zero value of these fields meaning "complete and nothing to report".
+- `Subset` is the publisher claiming its list leaves part of the tree out on purpose,
+  so an entry missing from it is not evidence the file is gone. Same negative-sense
+  rule as `Incomplete`: absent means a whole tree, and an old manifest changes
+  behavior for nobody. **Only `cmd/index` sets it**, from the rules an operator
+  typed, never from the manifest-key or marker excludes appended afterwards — those
+  are in every manifest ever written, and counting them would make every publish a
+  subset and stop every deletion in place. `walk` never sets it either, for the same
+  reason. `IndexOf` copies it forward when narrowing a published index, since a
+  subset narrowed further still has holes in it.
 - A decoded `Index` has a nil mutex (the unexported `Mutex` is omitted from JSON) —
   only call read/diff methods on decoded indexes.
 - `dumbsync-index` leaves its own output file out of the manifest by the key it
@@ -135,26 +145,37 @@ directory would end with exactly the same keys, so it is allowed to be conservat
 and give up on a pattern whose wildcards start above the directory. Never let
 pruning decide what is in scope.
 
-Rules live in the run, not in the manifest, and a client cannot tell a subset
-manifest from a whole one. `dumbsync-index` prints `Publishing a subset of <path>`
-when given rules and refuses to write a manifest at all when an include names
-nothing; `pkg/sync` returns `ErrUncovered` for the same mistake, before the
-destination is indexed or written. Keep both checks — a subset manifest plus a
-client told to `-delete` is the one way this feature destroys files.
+Rules themselves live in the run, not in the manifest: what the manifest carries is
+the one bit `Subset`, never the patterns that produced it. The client needs a
+property — can a missing entry be trusted? — not a program it would have to evaluate
+the way the indexer did, and a second copy of the rules would leak the publishing
+side's path policy and have no defined way to compose with the client's own. What the
+bit does buy is narrow and worth having: `pkg/sync` will not let a publisher's
+omissions author deletions until a human types `-allow-subset` on the client. Keep
+that boundary in the one place it can be checked, and do not let `AllowSubset` be
+implied by the client's own `Options.Rules`, which are safe by narrowing both ends.
+`dumbsync-index` prints what it published, and both binaries refuse an include that
+names nothing (`ErrUncovered` in `pkg/sync`, before the destination is indexed or
+written). A subset manifest plus a client told to `-delete` is still the one way this
+feature destroys files, and `-allow-subset` is the deliberate door to it.
 
-**Removing files takes three things**: `-delete`, a source that was read
-completely, and `.dumbsync-managed` in the destination. The marker is written by an
-earlier run, or by the first one if the directory is empty; `-delete` against a
-non-empty directory without it is refused so that a mistyped destination is not
-taken apart. Deleting the marker hands a directory back to its owner. What was kept
-instead of removed is reported as `Report.Leftover`, and printed.
+**Removing files takes four things**: `-delete`, a source that was read completely, a
+source that does not claim to describe only part of its tree (or `AllowSubset`, typed
+as `-allow-subset`), and `.dumbsync-managed` in the destination. The marker is written
+by an earlier run, or by the first one if the directory is empty; `-delete` against a
+non-empty directory without it is refused so that a mistyped destination is not taken
+apart. Deleting the marker hands a directory back to its owner. What was kept instead
+of removed is reported as `Report.Leftover`, and printed. `Incomplete` outranks
+`Subset` when a source says both: an unread list has a reason attached to it.
 
 **Exit statuses are the contract for timers.** `dumbsync-index`: 2 usage, including
 an `-include` that names nothing, 1 for a marshal/write failure or an incomplete
 tree, 0 otherwise. `dumbsync`: 2 for a complaint about the invocation (bad source
-scheme, half a certificate pair, `-delete` on an unclaimed directory, `ErrUncovered`),
+scheme, half a certificate pair, `-delete` on an unclaimed directory, `ErrUncovered`,
+`ErrSubset` when a partial manifest is synced with `-delete` and no `-allow-subset`),
 1 for a manifest that cannot be fetched or decoded, a file that would not land, or an
-incomplete source, and otherwise the `-exec` hook's own status.
+incomplete source, and otherwise the `-exec` hook's own status. `ErrSubset` is a 2 and
+not a 1 because nothing failed over the wire and the fix is the command line.
 
 **`-exec` runs only when the sync applied changes and nothing failed**, and its
 exit status becomes the binary's. 255 means the hook could not be started at all.
@@ -186,13 +207,16 @@ includes come back as `Uncovered`. `pkg/index` covers the diff, keys relative to
 root, rules (subtrees, an include after an exclude, an out-of-scope read failure that
 must not make the tree incomplete, pruning a wide tree losing nothing), published
 hashes winning over content on disk and surviving a narrowed `IndexOf`, the bounded
-pool still indexing a large tree, and incompleteness surviving the JSON round trip.
+pool still indexing a large tree, incompleteness surviving the JSON round trip, and
+the subset claim surviving both the round trip and a narrowing that must not lose it.
 `pkg/tree` covers the write/rename/remove round trip and, importantly, that a
 symlink inside a destination cannot be written through while removing it leaves the
 target alone. `pkg/httpfs` serves a tree over `httptest` and runs `fstest.TestFS`
 against it. `pkg/sync` covers the engine, including that only what the rules name is
-written or deleted, that `ErrUncovered` stops a run before anything is written, that
-a corrupt copy is refused in both staged and in-place modes, and wraps runs in
+written or deleted, that `ErrUncovered` stops a run before anything is written, that a
+source calling itself a subset keeps its removals until `AllowSubset` while still
+copying in full, that `Incomplete` is blamed ahead of `Subset` when a source says both,
+that a corrupt copy is refused in both staged and in-place modes, and wraps runs in
 `doWithDeadline` so a deadlock fails the test instead of hanging it.
 
 The binaries have no tests; check them by hand. Absolute paths are fine now:
@@ -202,6 +226,9 @@ cd /tmp/srv && dumbsync-index . && python3 -m http.server 8099 &
 dumbsync http://127.0.0.1:8099/ /tmp/dst
 dumbsync /tmp/srv /tmp/dst           # directory to directory, no server involved
 dumbsync -exclude '*' -include foo/ /tmp/srv /tmp/dst   # only foo/, and only foo/ is deletable
+dumbsync-index -index subset.json -exclude '**' -include foo/ /tmp/srv  # publishes "Subset": true
+dumbsync -index subset.json -delete http://127.0.0.1:8099/ /tmp/dst     # exits 2, keeps what the subset omits
+dumbsync -index subset.json -delete -allow-subset http://127.0.0.1:8099/ /tmp/dst  # now it removes them
 ```
 
 ## Conventions
