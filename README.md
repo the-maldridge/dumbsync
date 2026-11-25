@@ -124,13 +124,19 @@ narrowed that way says so in the file:
 > own.  `-allow-subset` is the word that says somebody read what the
 > manifest covers and means it.
 
+Only a run that actually has one of those files in front of it stops.
+Publishing with `-exclude .git` marks the manifest as a subset, and the
+clients syncing it go on copying it and exiting 0 forever, exactly as
+before, because nothing outside the list was ever in the destination to
+begin with.
+
 The indexer prints the narrowing and that consequence whenever it is
 given any rules at all, so both are in the log of the run that made them:
 
 ```
 Publishing a subset of /srv/www: [-exclude ** -include foo/]
-The manifest says it is one, so a client syncing with -delete keeps
-whatever it leaves out until that client passes -allow-subset
+A client given -delete will keep anything this manifest omits, and the
+run that does so stops with exit 2 until it also passes -allow-subset
 ```
 
 ### A name that matches nothing is refused
@@ -227,10 +233,10 @@ Exit status: `0` nothing needed doing, or everything that did landed;
 the source could not be read completely, or an `-exec` line that cannot
 be parsed; `2` the invocation is wrong (bad source, half a certificate
 pair, `-delete` on a directory dumbsync has not taken over, an
-`-include` that names nothing in the source, `-delete` against a source
-that says it describes only part of its tree without `-allow-subset`);
-otherwise the exit status of the `-exec` command, or `255` if it could
-not be started.
+`-include` that names nothing in the source, a `-delete` that would have
+removed a file a source describing only part of its tree does not
+mention, without `-allow-subset`); otherwise the exit status of the
+`-exec` command, or `255` if it could not be started.
 
 Output is one line per action, which scripts parse.  Keep to it if you
 are writing one.  Failures and warnings go to stderr, the rest to
@@ -273,6 +279,12 @@ end of it.  A manifest that says it describes only part of its tree is
 the same refusal with a different remedy: nothing went wrong, and what is
 missing is a second flag on the command line, so the run exits 2 and
 names `-allow-subset`.
+
+Neither refusal makes a noise when it has kept nothing.  A source
+published with `-exclude .git`, or `-exclude '**/node_modules/**'`, is
+marked as a subset all the same, and the runs against it that find
+nothing outside the list copy what changed and exit 0, so leaving junk
+out of a publication does not turn a scheduled sync into an alarm.
 
 ### Atomic updates
 

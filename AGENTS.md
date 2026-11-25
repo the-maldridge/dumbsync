@@ -159,6 +159,12 @@ names nothing (`ErrUncovered` in `pkg/sync`, before the destination is indexed o
 written). A subset manifest plus a client told to `-delete` is still the one way this
 feature destroys files, and `-allow-subset` is the deliberate door to it.
 
+Report the refusal only when it withheld a removal. Being partial is a standing
+property of a publication, not a fault in the run, so a source published with
+`-exclude .git` must keep syncing and exiting 0 forever, and only the run that would
+have deleted something the manifest omits stops. An alarm on every tick is an alarm
+that gets silenced, which is how this feature ends up worse than no feature.
+
 **Removing files takes four things**: `-delete`, a source that was read completely, a
 source that does not claim to describe only part of its tree (or `AllowSubset`, typed
 as `-allow-subset`), and `.dumbsync-managed` in the destination. The marker is written
@@ -166,16 +172,19 @@ by an earlier run, or by the first one if the directory is empty; `-delete` agai
 non-empty directory without it is refused so that a mistyped destination is not taken
 apart. Deleting the marker hands a directory back to its owner. What was kept instead
 of removed is reported as `Report.Leftover`, and printed. `Incomplete` outranks
-`Subset` when a source says both: an unread list has a reason attached to it.
+`Subset` when a source says both: an unread list has a reason attached to it. Neither
+refusal is an error when nothing was withheld; `Report.Subset` still says what the
+source claimed.
 
 **Exit statuses are the contract for timers.** `dumbsync-index`: 2 usage, including
 an `-include` that names nothing, 1 for a marshal/write failure or an incomplete
 tree, 0 otherwise. `dumbsync`: 2 for a complaint about the invocation (bad source
 scheme, half a certificate pair, `-delete` on an unclaimed directory, `ErrUncovered`,
-`ErrSubset` when a partial manifest is synced with `-delete` and no `-allow-subset`),
-1 for a manifest that cannot be fetched or decoded, a file that would not land, or an
-incomplete source, and otherwise the `-exec` hook's own status. `ErrSubset` is a 2 and
-not a 1 because nothing failed over the wire and the fix is the command line.
+`ErrSubset` when `-delete` was withheld from a file a partial source omits, which is
+not the same as merely syncing one), 1 for a manifest that cannot be fetched or
+decoded, a file that would not land, or an incomplete source, and otherwise the
+`-exec` hook's own status. `ErrSubset` is a 2 and not a 1 because nothing failed over
+the wire and the fix is the command line.
 
 **`-exec` runs only when the sync applied changes and nothing failed**, and its
 exit status becomes the binary's. 255 means the hook could not be started at all.
@@ -215,9 +224,10 @@ target alone. `pkg/httpfs` serves a tree over `httptest` and runs `fstest.TestFS
 against it. `pkg/sync` covers the engine, including that only what the rules name is
 written or deleted, that `ErrUncovered` stops a run before anything is written, that a
 source calling itself a subset keeps its removals until `AllowSubset` while still
-copying in full, that `Incomplete` is blamed ahead of `Subset` when a source says both,
-that a corrupt copy is refused in both staged and in-place modes, and wraps runs in
-`doWithDeadline` so a deadlock fails the test instead of hanging it.
+copying in full, that the same source with nothing outside its list is silent and
+succeeds under `-delete`, that `Incomplete` is blamed ahead of `Subset` when a source
+says both, that a corrupt copy is refused in both staged and in-place modes, and wraps
+runs in `doWithDeadline` so a deadlock fails the test instead of hanging it.
 
 The binaries have no tests; check them by hand. Absolute paths are fine now:
 
