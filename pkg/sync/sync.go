@@ -43,6 +43,14 @@ var ErrCorrupt = errors.New("copied content does not match the source")
 // the destination is touched.
 var ErrUncovered = errors.New("an include rule names nothing in the source")
 
+// ErrSubset is returned when a sync asked to delete is described by a
+// source that says it covers only part of its tree.  Whatever was
+// copied is kept, but a file the publisher left out of its list is not
+// evidence that the file is gone, so removing one needs a caller that
+// has read the list and means it, not a rule set that happens to be
+// narrow.  Files that would have been deleted are reported as leftover.
+var ErrSubset = errors.New("the source describes only part of its tree")
+
 // Options describes a single sync.
 type Options struct {
 	// Source is the tree to copy from, rooted at itself.
@@ -73,6 +81,14 @@ type Options struct {
 	// Delete removes destination files the source no longer describes.
 	// Without it a sync only adds and updates.
 	Delete bool
+
+	// AllowSubset lets removals be driven by a source that admits it
+	// describes only part of its tree.  It is off by default because the
+	// omissions in such a list look exactly like deletions from here, and
+	// deciding that a manifest covers everything worth keeping is a
+	// choice about the publisher's intent, not something a narrow rule
+	// set can imply on a caller's behalf.
+	AllowSubset bool
 
 	// Progress, when set, is called from the goroutine doing the work
 	// just before each file is copied or removed.
@@ -109,6 +125,11 @@ type Report struct {
 	// either because Delete was not set or because the source was not
 	// read completely enough to trust.
 	Leftover []string
+
+	// Subset reports that the source said it describes only part of its
+	// tree, in which case whatever sits in Leftover was never evidence of
+	// a removal: the source simply did not look that far.
+	Subset bool
 
 	// Failed holds one entry per key that could not be brought across,
 	// with the reason. A sync that fails part way through is not rolled
@@ -171,22 +192,31 @@ func Sync(o Options) (Report, error) {
 		hash:    src.HashType,
 		want:    src.Files,
 		threads: threads,
-		report:  Report{Failed: map[string]error{}},
+		report:  Report{Failed: map[string]error{}, Subset: src.Subset},
 	}
 
 	r.report.Added, r.report.Changed = r.copy(added, changed)
 
 	// Deletions are the only part of a sync that cannot be undone, so
 	// they need both an explicit request and a source that can be
-	// trusted to be telling the whole story.
-	if len(removed) > 0 && o.Delete && !src.Incomplete {
+	// trusted to be telling the whole story.  A source that says it left
+	// things out on purpose is not telling one either, whatever the
+	// caller asked for.
+	if len(removed) > 0 && o.Delete && !src.Incomplete && (!src.Subset || o.AllowSubset) {
 		r.report.Removed = r.remove(removed)
 	} else {
 		r.report.Leftover = removed
 	}
 
+	// Incomplete is answered first: a list that could not be finished has
+	// a reason attached to it, and that is the more useful thing to say
+	// than that the list is also partial.
 	if src.Incomplete {
 		return r.report, fmt.Errorf("%w: %v", ErrIncomplete, src.Errors)
+	}
+
+	if src.Subset && o.Delete && !o.AllowSubset {
+		return r.report, fmt.Errorf("%w: %d file(s) kept, deleting against a partial list needs an explicit acknowledgement", ErrSubset, len(removed))
 	}
 
 	return r.report, nil

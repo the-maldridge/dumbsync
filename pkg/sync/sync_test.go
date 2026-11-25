@@ -161,6 +161,123 @@ func TestIncompleteSourceCannotDelete(t *testing.T) {
 	check(t, dst, "maybe.txt", "still there")
 }
 
+// A publisher that says its list covers part of the tree is not claiming
+// the rest is gone, so a deletion asked for from such a list stops short
+// even though the caller asked for deletions.
+func TestAPartialSourceCannotDelete(t *testing.T) {
+	dst := t.TempDir()
+	seed(t, dst, map[string]string{"keep.txt": "stay", "unmentioned.txt": "still there"})
+
+	src := fstest.MapFS{"keep.txt": &fstest.MapFile{Data: []byte("stay")}}
+	idx, err := index.IndexFS(src, index.Options{Hash: index.XXHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.Subset = true
+
+	rep, err := syncTo(t, publisher{FS: src, idx: idx}, dst, func(o *dsync.Options) {
+		o.Delete = true
+	})
+	if !errors.Is(err, dsync.ErrSubset) {
+		t.Fatalf("err = %v, want dsync.ErrSubset", err)
+	}
+
+	if want := []string{"unmentioned.txt"}; !equal(rep.Leftover, want) {
+		t.Errorf("leftover = %v, want %v", rep.Leftover, want)
+	}
+	if len(rep.Removed) != 0 {
+		t.Errorf("removed = %v, want nothing at all", rep.Removed)
+	}
+	if !rep.Subset {
+		t.Error("the report does not say the source described part of a tree")
+	}
+	check(t, dst, "unmentioned.txt", "still there")
+}
+
+// The refusal is about a caller that has not looked at what the list
+// covers, so a caller that says it means it gets its removals.
+func TestAllowSubsetLiftsThePartialSourceRefusal(t *testing.T) {
+	dst := t.TempDir()
+	seed(t, dst, map[string]string{"keep.txt": "stay", "unmentioned.txt": "bye"})
+
+	src := fstest.MapFS{"keep.txt": &fstest.MapFile{Data: []byte("stay")}}
+	idx, err := index.IndexFS(src, index.Options{Hash: index.XXHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.Subset = true
+
+	rep, err := syncTo(t, publisher{FS: src, idx: idx}, dst, func(o *dsync.Options) {
+		o.Delete = true
+		o.AllowSubset = true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"unmentioned.txt"}; !equal(rep.Removed, want) {
+		t.Errorf("removed = %v, want %v", rep.Removed, want)
+	}
+	if _, err := fs.Stat(osDirFS(dst), "unmentioned.txt"); !os.IsNotExist(err) {
+		t.Errorf("unmentioned.txt survived: %v", err)
+	}
+}
+
+// A list that both failed to finish and announced itself as partial has
+// one reason worth reporting, and it is the one with a cause attached.
+func TestAnUnfinishedSourceIsBlamedBeforeItsSubsetClaim(t *testing.T) {
+	dst := t.TempDir()
+	seed(t, dst, map[string]string{"keep.txt": "stay", "maybe.txt": "still there"})
+
+	src := fstest.MapFS{"keep.txt": &fstest.MapFile{Data: []byte("stay")}}
+	idx, err := index.IndexFS(src, index.Options{Hash: index.XXHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.Incomplete = true
+	idx.Errors = []string{"unreadable.txt: permission denied"}
+	idx.Subset = true
+
+	_, err = syncTo(t, publisher{FS: src, idx: idx}, dst, func(o *dsync.Options) {
+		o.Delete = true
+	})
+	if !errors.Is(err, dsync.ErrIncomplete) {
+		t.Fatalf("err = %v, want dsync.ErrIncomplete", err)
+	}
+	if errors.Is(err, dsync.ErrSubset) {
+		t.Errorf("one run refused for two reasons: %v", err)
+	}
+	check(t, dst, "maybe.txt", "still there")
+}
+
+// Being partial only takes away what a list can prove about files it does
+// not mention, so a run that removes nothing goes about its business.
+func TestAPartialSourceStillCopies(t *testing.T) {
+	dst := t.TempDir()
+	seed(t, dst, map[string]string{"unmentioned.txt": "still there"})
+
+	src := fstest.MapFS{"new.txt": &fstest.MapFile{Data: []byte("fresh")}}
+	idx, err := index.IndexFS(src, index.Options{Hash: index.XXHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.Subset = true
+
+	rep, err := syncTo(t, publisher{FS: src, idx: idx}, dst, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"new.txt"}; !equal(rep.Added, want) {
+		t.Errorf("added = %v, want %v", rep.Added, want)
+	}
+	if want := []string{"unmentioned.txt"}; !equal(rep.Leftover, want) {
+		t.Errorf("leftover = %v, want %v", rep.Leftover, want)
+	}
+	check(t, dst, "unmentioned.txt", "still there")
+	check(t, dst, "new.txt", "fresh")
+}
+
 // The destination has to be hashed the way the source published itself,
 // otherwise every run finds a tree full of differences.
 func TestDestinationFollowsTheSourceAlgorithm(t *testing.T) {
