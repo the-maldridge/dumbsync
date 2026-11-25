@@ -32,9 +32,14 @@ PRs, so run `go vet ./...`, `go test -race ./...` and `gofmt -l .` yourself.
 ## Layout
 
 - `pkg/index/` — describing a tree. `type.go` = `Index`, `HashType`; `index.go` =
-  `Options`, `IndexFS`, `IndexOf`, `Provider`, `Index.Difference`,
+  `Options`, `IndexFS`, `IndexOf`, `Provider`, `Index.Difference`, `Index.Keys`,
   `HashTypeFromEnv`; `walk.go` = the bounded pool that hashes a tree, plus
   `NewHash`, which anyone writing files must use to check what landed.
+- `pkg/scope/` — what a sync is allowed to touch. `Rule` (one pattern and its
+  decision), `Rules` (an ordered list: `Keep`, `Descend`, `Uncovered`), `Parse`,
+  `Quote`, `MustParse`, and `RuleFlag` so `flag` can append `-exclude` and
+  `-include` to one list. Depends on nothing else in here, and both ends depend on
+  it, so do not let it import `pkg/index`.
 - `pkg/tree/` — the writable end. `tree.Open(dir)` returns a `Tree` rooted at an
   open `os.Root`: `FS`, `MkdirAll`, `OpenWrite`, `Rename`, `RemoveAll`, `Name`,
   `Close`, plus `TempKey` for staging a file beside the one it replaces.
@@ -50,8 +55,9 @@ PRs, so run `go vet ./...`, `go test -race ./...` and `gofmt -l .` yourself.
   timer.
 
 Flow in `pkg/sync.Sync`: index the source with `IndexOf` (its own hashes when it
-publishes them, a walk otherwise) → index the destination **with the source's
-algorithm** → `Difference` → copy adds and changes through one pool sized by
+publishes them, a walk otherwise) → refuse with `ErrUncovered` if any include rule
+matched no source file → index the destination **with the source's algorithm and
+the same rule set** → `Difference` → copy adds and changes through one pool sized by
 `-threads`, hashing each file on the way in and refusing it when the digest is not
 what the source said → move staged files into place when `-delay-changes` →
 removals only if `-delete` and the source was read completely → `Report{Added,
@@ -78,17 +84,23 @@ Go field names: `{"Files": {...}, "HashType": 1, "Incomplete": true, "Errors":
 - `dumbsync-index` leaves its own output file out of the manifest by the key it
   has **inside the tree** (`sub/meta.json`), computed from `-index` relative to the
   tree being indexed. `-index` itself is resolved against the current working
-  directory, so a manifest written outside the tree excludes nothing.
+  directory, so a manifest written outside the tree excludes nothing. That key joins
+  the rule set as a quoted exclude, appended after anything the operator passed.
 
 ## Non-obvious constraints
 
-**Keys are not paths.** A key satisfies `fs.ValidPath`: unrooted, slash-separated,
-no `..`, no trailing slash. Roots — operating system paths — are accepted only by
-`tree.Open`, `os.DirFS`, and the two `cmd` binaries. `keySet` in
-`pkg/index/index.go` validates `Options.Exclude`, `writable` in `pkg/tree/tree.go`
-checks every write, and `os.Root` checks again in the kernel, so a key cannot land
-outside a destination even when a caller above it is careless. Do not add a check
-that runs `fs.ValidPath` on a *root*: that was the bug that made `/data/src` fail
+**Keys are not paths, and patterns are not keys either.** A key satisfies
+`fs.ValidPath`: unrooted, slash-separated, no `..`, no trailing slash.
+Patterns are looser on purpose — a trailing slash is the same rule as
+none, a leading `./` is ignored, and `*`, `**`, `?` and `\` are syntax —
+so `scope.Parse` validates them its own way and then hands back a
+compiled rule; `fs.ValidPath` is used on the normalized form, which is
+why `.` alone is rejected explicitly. Roots — operating system paths —
+are accepted only by `tree.Open`, `os.DirFS`, and the two `cmd` binaries.
+`writable` in `pkg/tree/tree.go` checks every write, and `os.Root` checks
+again in the kernel, so a key cannot land outside a destination even when
+a caller above it is careless. Do not add a check that runs
+`fs.ValidPath` on a *root*: that was the bug that made `/data/src` fail
 while `src` worked.
 
 **The source chooses the hash algorithm.** `DUMBSYNC_HASH` (`MD5` default, `XX`
@@ -103,7 +115,32 @@ but it sets `Incomplete` and collects up to 32 reasons. `Sync` then keeps every
 file it would have deleted and returns `ErrIncomplete`, and `dumbsync-index`
 writes the manifest anyway and exits 1. A flaky server read must never turn into
 deletions on clients, and a partial manifest must still be published so the next
-run can be compared against it.
+run can be compared against it. The one exception is a read below a directory the
+rules already put out of scope, which is not recorded at all, and is the only
+place a failure is allowed to go unremarked.
+
+**Scope has to be invisible on both ends.** The same ordered rule set goes into the
+source index and the destination index, and that symmetry is the whole safety
+property: what is out of scope is not copied, not compared, and not deleted, while
+a filter applied to one side only would turn every omitted file into a removal.
+Keep `Options.Rules` in `pkg/index` and `pkg/sync` wired to the same list. The last
+rule matching a key decides and no match means keep, which is what lets
+`-exclude '*' -include foo/` read the way it sounds; rules a caller needs for its
+own safety (`cmd/sync`'s marker and manifest, `cmd/index`'s manifest) are appended
+**after** the user's, because last-match-wins is what makes them unoverridable, and
+quoted with `scope.Quote`, because they are file names and not patterns.
+
+`Rules.Descend` is an optimization and nothing more: a walk that descended every
+directory would end with exactly the same keys, so it is allowed to be conservative
+and give up on a pattern whose wildcards start above the directory. Never let
+pruning decide what is in scope.
+
+Rules live in the run, not in the manifest, and a client cannot tell a subset
+manifest from a whole one. `dumbsync-index` prints `Publishing a subset of <path>`
+when given rules and refuses to write a manifest at all when an include names
+nothing; `pkg/sync` returns `ErrUncovered` for the same mistake, before the
+destination is indexed or written. Keep both checks — a subset manifest plus a
+client told to `-delete` is the one way this feature destroys files.
 
 **Removing files takes three things**: `-delete`, a source that was read
 completely, and `.dumbsync-managed` in the destination. The marker is written by an
@@ -112,12 +149,12 @@ non-empty directory without it is refused so that a mistyped destination is not
 taken apart. Deleting the marker hands a directory back to its owner. What was kept
 instead of removed is reported as `Report.Leftover`, and printed.
 
-**Exit statuses are the contract for timers.** `dumbsync-index`: 2 usage, 1 for a
-marshal/write failure or an incomplete tree, 0 otherwise. `dumbsync`: 2 for a
-complaint about the invocation (bad source scheme, half a certificate pair,
-`-delete` on an unclaimed directory), 1 for a manifest that cannot be fetched or
-decoded, a file that would not land, or an incomplete source, and otherwise the
-`-exec` hook's own status.
+**Exit statuses are the contract for timers.** `dumbsync-index`: 2 usage, including
+an `-include` that names nothing, 1 for a marshal/write failure or an incomplete
+tree, 0 otherwise. `dumbsync`: 2 for a complaint about the invocation (bad source
+scheme, half a certificate pair, `-delete` on an unclaimed directory, `ErrUncovered`),
+1 for a manifest that cannot be fetched or decoded, a file that would not land, or an
+incomplete source, and otherwise the `-exec` hook's own status.
 
 **`-exec` runs only when the sync applied changes and nothing failed**, and its
 exit status becomes the binary's. 255 means the hook could not be started at all.
@@ -142,16 +179,21 @@ why `tree.Tree` exists by hand. Check before inventing another one.
 
 ## Testing
 
-Every package but `cmd/` has tests. `pkg/index` covers the diff, keys relative to
-a root, `Exclude` (including whole subtrees, and refusing names that cannot be
-keys), published hashes winning over content on disk, the bounded pool still
-indexing a large tree, and incompleteness surviving the JSON round trip.
+Every package but `cmd/` has tests. `pkg/scope` covers the pattern language
+segment by segment, ordering including a broad exclude that a later include saves a
+directory from, `Descend` with the reasoning attached to each case, and which
+includes come back as `Uncovered`. `pkg/index` covers the diff, keys relative to a
+root, rules (subtrees, an include after an exclude, an out-of-scope read failure that
+must not make the tree incomplete, pruning a wide tree losing nothing), published
+hashes winning over content on disk and surviving a narrowed `IndexOf`, the bounded
+pool still indexing a large tree, and incompleteness surviving the JSON round trip.
 `pkg/tree` covers the write/rename/remove round trip and, importantly, that a
 symlink inside a destination cannot be written through while removing it leaves the
 target alone. `pkg/httpfs` serves a tree over `httptest` and runs `fstest.TestFS`
-against it. `pkg/sync` covers the engine, including that a corrupt copy is refused
-in both staged and in-place modes, and wraps runs in `doWithDeadline` so a
-deadlock fails the test instead of hanging it.
+against it. `pkg/sync` covers the engine, including that only what the rules name is
+written or deleted, that `ErrUncovered` stops a run before anything is written, that
+a corrupt copy is refused in both staged and in-place modes, and wraps runs in
+`doWithDeadline` so a deadlock fails the test instead of hanging it.
 
 The binaries have no tests; check them by hand. Absolute paths are fine now:
 
@@ -159,6 +201,7 @@ The binaries have no tests; check them by hand. Absolute paths are fine now:
 cd /tmp/srv && dumbsync-index . && python3 -m http.server 8099 &
 dumbsync http://127.0.0.1:8099/ /tmp/dst
 dumbsync /tmp/srv /tmp/dst           # directory to directory, no server involved
+dumbsync -exclude '*' -include foo/ /tmp/srv /tmp/dst   # only foo/, and only foo/ is deletable
 ```
 
 ## Conventions
@@ -176,7 +219,9 @@ dumbsync /tmp/srv /tmp/dst           # directory to directory, no server involve
   because `os.Root.MkdirAll`, `os.Root.Rename` and `os.Root.RemoveAll` need it.
 - Flags stay package-level `flag.*` vars named `sync*`/`indexFilePath`. Both
   `main` functions are `os.Exit(run())`, which is how exit codes propagate; keep
-  the IIFE out.
+  the IIFE out. `-exclude` and `-include` are `scope.RuleFlag`s registered in
+  `init()` against one shared `scope.Rules`, so the interleaved order they were
+  typed in is the order that decides.
 - Output is plain stdout lines: `[+]` added, `[~]` changed, `[-]` removed, plus a
   `Synchronizing against <source>` header and a `Kept N file(s) ...` line when
   something was not removed. Scripts parse the three marks; keep them.

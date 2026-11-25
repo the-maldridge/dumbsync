@@ -64,15 +64,102 @@ dumbsync /srv/www /backup/www
 dumbsync file:///srv/www /backup/www
 ```
 
+## Selecting what to sync
+
+Both binaries take `-exclude` and `-include`, either of them as many
+times as you like.  Every one of them joins a single ordered list, and
+the last rule matching a name decides whether that name is in scope.  A
+name no rule matches is in scope, which is why a run with none of these
+flags still syncs the whole tree.
+
+**The last rule wins**, so the order is not decoration:
+`-exclude '*' -include foo/` takes `foo/` and nothing else, and
+`-include foo/ -exclude '*'` takes nothing at all.
+
+| Pattern | Names |
+|---|---|
+| `docs` or `docs/` | `docs` and everything below it |
+| `*` | every name in one path segment, which with the row above means the whole tree |
+| `*.tmp` | `x.tmp` at the top of the tree, and not `a/x.tmp` |
+| `**/*.tmp` | any `.tmp` file at any depth |
+| `**/node_modules/**` | `node_modules` at any depth |
+| `?` | one character within one segment |
+| `\*` | a name that really does contain a `*` |
+
+Patterns are anchored at the root of the tree and written with forward
+slashes.  `*` stops at a slash, `**` crosses slashes, `?` is one
+character other than a slash, and a backslash quotes whatever follows it.
+Naming a thing names everything below it, so `docs` and `docs/` are the
+same rule, and a leading `./` is accepted and ignored.
+
+What is out of scope is missing from the index on both sides, which is
+what makes selecting files safe rather than merely quiet: an omitted file
+is not copied, not compared, and not removed from the destination, even
+with `-delete`.  A file at the destination that sits in a directory
+nobody asked for survives a `-delete` run untouched.
+
+```sh
+# Two directories out of a large tree, and nothing else:
+dumbsync -exclude '*' -include foo/ -include bar/ http://files.example.com/ /var/www
+
+# Everything, less the version control and any node_modules at any depth:
+dumbsync -exclude .git -exclude '**/node_modules/**' http://files.example.com/ /var/www
+```
+
+Scope is decided by files, so a directory with nothing in scope inside it
+is simply not created at the destination.
+
+### The two ends have to agree
+
+The rules are not written into the manifest and the manifest does not
+remember them.  Rules given to `dumbsync` narrow one destination and
+change nothing about what is published.  Rules given to `dumbsync-index`
+narrow the manifest itself, and every client then believes that subset is
+the whole tree:
+
+> A manifest built with `-exclude '**'`, synced from by a client given
+> `-delete`, will remove from that destination everything the subset
+> omitted.  Both ends are behaving as designed, which is exactly why the
+> combination is worth reading twice before scheduling it.
+
+The indexer prints `Publishing a subset of <path>: [-exclude ** -include
+foo/]` whenever it is given any rules at all, so the narrowing is in the
+log of the run that did it.
+
+### A name that matches nothing is refused
+
+An `-include` covering no file is a mistyped path far more often than it
+is a deliberate no-op, and with everything else excluded such a run would
+copy nothing, delete nothing, and exit 0, which is indistinguishable from
+a healthy run that had nothing to do.  Both binaries refuse it instead:
+exit status 2, nothing written, and the offending rule named back:
+
+```
+an include rule names nothing in the source: -include nope/
+```
+
+`dumbsync-index` makes the same check before writing, and adds `No
+manifest was written; check the patterns against the tree`.
+
+### Two names cannot be included back
+
+The marker `.dumbsync-managed` and the manifest named by `-index` are out
+of scope whatever else the rules say.  They join the rule list after
+everything typed on the command line, and quoted as the plain file names
+they are, so `-include '*'` cannot pull either one into the sync and a
+star in an index filename reaches that file alone.
+
 ## dumbsync-index
 
 ```
-dumbsync-index [-index filename] <path>
+dumbsync-index [-index filename] [-exclude pattern] [-include pattern] <path>
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-index` | `dumbsync.json` | Where to write the manifest.  Resolved against the current working directory, which is not necessarily inside `<path>`. |
+| `-exclude` | none | Leave out everything a pattern names.  Repeatable, order matters, see [Selecting what to sync](#selecting-what-to-sync). |
+| `-include` | none | Put back what an earlier `-exclude` left out.  Repeatable, order matters. |
 
 `<path>` is a directory on the local system and may be absolute or
 relative.  The manifest describes files by their names inside `<path>`,
@@ -87,7 +174,8 @@ Environment:
 | `DUMBSYNC_HASH` | `MD5` (default), `XX` | Digest algorithm.  Anything unrecognized means MD5.  Case-insensitive. |
 
 Exit status: `0` the manifest is complete, `1` it could not be written
-or a file could not be read, `2` bad invocation.
+or a file could not be read, `2` bad invocation, including an `-include`
+that names nothing in the tree.
 
 If a file cannot be read, the manifest is still written, with
 `"Incomplete": true` and up to 32 reasons in `"Errors"`, and the exit
@@ -116,21 +204,23 @@ of the tree it describes.
 | `-timeout` | `10s` | Per-request HTTP timeout, body included.  Raise it for large files. |
 | `-delay-changes` | off | Write every file beside its final name and move it into place once all transfers finish. |
 | `-delete` | off | Remove destination files the source no longer lists. |
+| `-exclude` | none | Leave out everything a pattern names.  Repeatable, order matters, see [Selecting what to sync](#selecting-what-to-sync). |
+| `-include` | none | Put back what an earlier `-exclude` left out.  Repeatable, order matters. |
 | `-exec` | none | Command to run when the run changed something. |
 | `-cert`, `-key` | none | Client certificate and key, for a server that checks them.  Both or neither. |
 
 The name given by `-index` is left out of the comparison on both sides,
 so a manifest sitting in the destination is neither overwritten nor
 counted as an extra file, and `.dumbsync-managed` is left alone for the
-same reason.
+same reason.  Neither can be brought back by an `-include`.
 
 Exit status: `0` nothing needed doing, or everything that did landed;
 `1` a file would not land, the manifest could not be fetched or decoded,
 the source could not be read completely, or an `-exec` line that cannot
 be parsed; `2` the invocation is wrong (bad source, half a certificate
-pair, `-delete` on a directory dumbsync has not taken over); otherwise
-the exit status of the `-exec` command, or `255` if it could not be
-started.
+pair, `-delete` on a directory dumbsync has not taken over, an
+`-include` that names nothing in the source); otherwise the exit status
+of the `-exec` command, or `255` if it could not be started.
 
 Output is one line per action, which scripts parse.  Keep to it if you
 are writing one.  Failures and warnings go to stderr, the rest to
@@ -217,9 +307,10 @@ only the client end in a container.
   carried across: files are created with the destination's umask and
   directories `0755`, and their mtime is when they were written.
 - Removals leave directories behind once they are empty.
-- There are no include or exclude patterns.  Anything in the source
-  tree, including a `.git` directory or editor droppings, is indexed and
-  copied.  Index a subtree that contains only what you want published.
+- Patterns select by path and nothing else: there is no way to skip a
+  file by size, age or ownership, and no rules stored between runs, so
+  both ends are told separately.  See
+  [Selecting what to sync](#selecting-what-to-sync).
 - It is one way.  The destination is expected to be quiet.  A file
   changed at the destination is overwritten on the next run, and with
   `-delete` a file created at the destination is removed.
